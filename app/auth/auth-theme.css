@@ -1,0 +1,79 @@
+/* ═══════════════════════════════════════════════════════════
+   AUTH THEME — Route-specific typography overrides
+   CSS variables are defined in globals.css (:root).
+   ═══════════════════════════════════════════════════════════ */
+
+/* Auth routes keep the current Plus Jakarta Sans type (scope guard).
+   The app-wide --font-display/--font-body are Bricolage/Hanken; we pin them
+   back to Plus Jakarta here so the auth redesign only touches layout, not type. */
+.auth-route {
+  --font-display: var(--font-plus-jakarta), ui-sans-serif, system-ui, sans-serif;
+  --font-body: var(--font-plus-jakarta), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-plus-jakarta), ui-sans-serif, system-ui, sans-serif;
+}
+
+.auth-route h1,
+.auth-route h2,
+.auth-route h3,
+.auth-route h4,
+.auth-route h5,
+.auth-route h6,
+.auth-route p,
+.auth-route button,
+.auth-route input,
+.auth-route a,
+.auth-route label {
+  font-family: inherit;
+}
+
+/* Typography enhancements for dashboard/embed routes */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: var(--text-primary);
+}
+
+h1 {
+  font-size: var(--text-hero);
+}
+
+h2 {
+  font-size: var(--text-4xl);
+}
+
+h3 {
+  font-size: var(--text-3xl);
+}
+
+h4 {
+  font-size: var(--text-2xl);
+}
+
+h5 {
+  font-size: var(--text-xl);
+}
+
+h6 {
+  font-size: var(--text-lg);
+}
+
+p {
+  color: var(--text-secondary);
+}
+
+:focus-visible {
+  outline-color: var(--brand-primary);
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: oklch(0.65 0.18 160 / 0.2);
+  color: var(--text-primary);
+}

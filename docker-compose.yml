@@ -1,0 +1,39 @@
+services:
+  gapura-oneclick:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        WEB_BUILD_ENV_REV: ${WEB_BUILD_ENV_REV:-manual}
+      secrets:
+        - web_build_env
+    image: gapura-oneclick:web
+    container_name: gapura-oneclick
+    restart: unless-stopped
+    env_file:
+      - ${PRODUCTION_ENV_FILE:-.env.production}
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    ports:
+      - "${WEB_PRODUCTION_PORT:-3001}:3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          require('http').get('http://127.0.0.1:3000/auth/login',
+          response => process.exit(response.statusCode >= 200 &&
+          response.statusCode < 400 ? 0 : 1))
+          .on('error', () => process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+secrets:
+  web_build_env:
+    file: ${WEB_BUILD_ENV_FILE:-.env.web-build}

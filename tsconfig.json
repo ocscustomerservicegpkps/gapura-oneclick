@@ -1,0 +1,57 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext",
+      "webworker"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "types": [
+      "@serwist/next/typings"
+    ],
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "baseUrl": ".",
+    "ignoreDeprecations": "5.0",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts",
+    ".next-audit/types/**/*.ts",
+    ".next-audit/dev/types/**/*.ts",
+    ".next-verify/types/**/*.ts",
+    ".next-verify/dev/types/**/*.ts",
+    ".next-dev-alt/types/**/*.ts",
+    ".next-dev-alt/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "tmp/**",
+    "public/sw.js"
+  ]
+}

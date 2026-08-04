@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --include=dev
+
+COPY . .
+
+# The revision participates in the cache key because BuildKit intentionally
+# does not invalidate cached layers when only a secret's contents change.
+ARG WEB_BUILD_ENV_REV=manual
+ENV NODE_ENV=production
+RUN --mount=type=secret,id=web_build_env,target=/app/.env.production,required=true \
+    test -n "$WEB_BUILD_ENV_REV" && \
+    npm run build
+
+
+FROM node:22-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+
+COPY package.json package-lock.json ./
+
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev
+
+COPY --chown=node:node --from=builder /app/.next ./.next
+COPY --chown=node:node --from=builder /app/public ./public
+COPY --chown=node:node --from=builder /app/next.config.mjs ./next.config.mjs
+COPY --chown=node:node --from=builder /app/scripts/check-node-version.js ./scripts/check-node-version.js
+
+EXPOSE 3000
+
+USER node
+
+CMD ["npm", "start"]
