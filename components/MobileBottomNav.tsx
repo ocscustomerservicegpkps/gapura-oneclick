@@ -1,14 +1,15 @@
 'use client';
 
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { 
-    LayoutDashboard, 
-    PlusCircle, 
-    Menu, 
+import {
+    LayoutDashboard,
+    PlusCircle,
+    Menu,
     LogOut,
     FileText,
     Brain,
     Undo2,
+    UserRound,
     type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -108,6 +109,7 @@ export function MobileBottomNav({ role, division }: MobileBottomNavProps) {
 
             items.push({ href: reportsHref, label: reportsLabel, icon: FileText });
             items.push({ href: '/dashboard/employee/new', label: 'Create', icon: PlusCircle, isPrimary: true });
+            items.push({ href: '/dashboard/settings/profile', label: 'Profile', icon: UserRound });
             items.push({ href: '#menu', label: 'Menu', icon: Menu });
         } else {
             // Divisi roles (OP/OS/OCS/HT/HC/...) don't live under /dashboard/employee —
@@ -136,6 +138,7 @@ export function MobileBottomNav({ role, division }: MobileBottomNavProps) {
                 items.push({ href: aiReportsHref, label: 'AI', icon: Brain });
             }
 
+            items.push({ href: '/dashboard/settings/profile', label: 'Profile', icon: UserRound });
             items.push({ href: '#menu', label: 'Menu', icon: Menu });
         }
 

@@ -511,30 +511,23 @@ export class SyncService {
 
       if (dirtyReports.length === 0) return 0;
 
-      // Bounded concurrency (not fully sequential, not unbounded) — the
-      // Sheets API enforces a per-minute write quota, so a small batch size
-      // cuts wall-clock time versus one row at a time without bursting it.
-      // synced_at is stamped in one batched update after the push, instead
-      // of one Supabase round trip per successful row.
+      // All dirty rows go out as a single values.batchUpdate — one Sheets API
+      // call instead of one-per-row — so a 50-row backlog can't blow the
+      // per-minute write quota on login-triggered syncs. synced_at is stamped
+      // in one batched update after the push, instead of one Supabase round
+      // trip per successful row. All-or-nothing: if the push throws (e.g.
+      // quota still exceeded after retries), no rows get stamped and the next
+      // sync retries them.
       const PUSH_BATCH_SIZE = 5;
-      const syncedRows: typeof dirtyReports = [];
-      for (let i = 0; i < dirtyReports.length; i += PUSH_BATCH_SIZE) {
-        const batch = dirtyReports.slice(i, i + PUSH_BATCH_SIZE);
-        const results = await Promise.allSettled(batch.map((report) =>
-          // report is the full DB row, so it's already the authoritative
-          // source being pushed out to Sheets here — no need to live-merge
-          // evidence/video URLs against a fresh Sheets read for every row.
-          reportsService.updateReport(report.sheet_id, report, { skipLiveFetch: true })
-        ));
-        results.forEach((result, idx) => {
-          const report = batch[idx];
-          if (result.status === 'fulfilled' && result.value) {
-            syncedRows.push(report);
-            pushed++;
-          } else if (result.status === 'rejected') {
-            console.warn(`[SyncService] Failed to push report ${report.sheet_id} to Sheets:`, result.reason);
-          }
-        });
+      let syncedRows: typeof dirtyReports = [];
+      try {
+        syncedRows = await reportsService.updateReportsToSheets(
+          dirtyReports.map((report) => ({ sheetId: report.sheet_id, report })),
+          { skipLiveFetch: true }
+        );
+        pushed = syncedRows.length;
+      } catch (pushError) {
+        console.warn('[SyncService] Failed to push local updates to Sheets:', pushError);
       }
 
       if (syncedRows.length > 0) {

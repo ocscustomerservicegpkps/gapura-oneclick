@@ -1848,8 +1848,6 @@ class ReportsService {
     const parsed = this.parseId(originalId);
     if (!parsed) return null;
 
-    const sheets = await this.getSheets();
-    if (!SPREADSHEET_ID) throw new Error('GOOGLE_SHEET_ID is not defined');
     const { sheetName, rowIndex } = parsed;
 
     if (updates.primary_tag === 'CGO' && sheetName !== 'CGO') {
@@ -1874,18 +1872,6 @@ class ReportsService {
         }
     }
 
-    const headers = await this.getHeaderRow(sheetName);
-
-    const getColLetter = (index: number): string => {
-        let col = '';
-        let n = index;
-        while (n >= 0) {
-            col = String.fromCharCode(65 + (n % 26)) + col;
-            n = Math.floor(n / 26) - 1;
-        }
-        return col;
-    };
-
     const effectiveUpdates: Partial<Report> = { ...updates };
 
     if ('esklasi_divisi' in effectiveUpdates) {
@@ -1902,37 +1888,62 @@ class ReportsService {
         // against clobbering a URL someone just pasted directly into the sheet.
         const currentReport = await this.getReportById(id, { forceLiveFetch: options.skipLiveFetch !== true });
         if (currentReport) {
-            const existingUrls = [
-                ...(Array.isArray(currentReport.evidence_urls) ? currentReport.evidence_urls : []),
-                ...(currentReport.evidence_url && !Array.isArray(currentReport.evidence_urls) ? [currentReport.evidence_url] : []),
-                ...(Array.isArray(currentReport.video_urls) ? currentReport.video_urls : []),
-                ...(currentReport.video_url && !Array.isArray(currentReport.video_urls) ? [currentReport.video_url] : [])
-            ];
-            const newUrls = [
-                ...(Array.isArray(effectiveUpdates.evidence_urls) ? effectiveUpdates.evidence_urls : []),
-                ...(effectiveUpdates.evidence_url ? [effectiveUpdates.evidence_url] : []),
-                ...(Array.isArray(effectiveUpdates.video_urls) ? effectiveUpdates.video_urls : []),
-                ...(effectiveUpdates.video_url ? [effectiveUpdates.video_url] : [])
-            ];
-
-            const hasNewEditedDocx = newUrls.some(u => {
-                const dec = decodeURIComponent(String(u||'')).toUpperCase();
-                return dec.includes('IRREGULARITY_REPORT_EDITED') && dec.includes('.DOCX');
-            });
-
-            let filteredExisting = existingUrls;
-            if (hasNewEditedDocx) {
-                 filteredExisting = existingUrls.filter(u => {
-                    const dec = decodeURIComponent(String(u||'')).toUpperCase();
-                    return !(dec.includes('IRREGULARITY_REPORT_EDITED') && dec.includes('.DOCX'));
-                 });
-            }
-
-            effectiveUpdates.evidence_urls = [...new Set([...filteredExisting, ...newUrls])].filter(Boolean);
+            this.mergeEvidenceUrls(effectiveUpdates, currentReport);
         }
     }
 
-    const batchData: { range: string; values: string[][] }[] = [];
+    const batchData = await this.buildSheetWriteBatch(sheetName, rowIndex, effectiveUpdates);
+
+    if (batchData.length > 0) {
+        await this.writeBatchToSheets(batchData);
+    }
+
+    this.invalidateCache();
+    // We just wrote effectiveUpdates to the sheet ourselves, so there's nothing
+    // fresher to protect against by reading it live back — that round-trip was
+    // costing every caller (notably the up-to-50-row sync push-back loop) 2
+    // extra Google Sheets API reads per report for a return value most callers
+    // don't even use, and was blowing through the per-minute read quota.
+    const existing = await this.getReportById(id, { skipLiveFetch: true });
+    if (existing) {
+        return syncEscalationDivisionAliases({ ...existing, ...effectiveUpdates });
+    }
+
+    return {
+        id: id,
+        original_id: originalId,
+        sheet_id: originalId,
+        ...effectiveUpdates
+    } as Report;
+  }
+
+  /**
+   * Maps an updates payload onto sheet cell ranges, deduped by cell. Multiple
+   * Report props legitimately map to the same sheet column (e.g. airline and
+   * airlines both land on "Airlines"), so a full-row push from the sync loop
+   * used to write the same cell two or three times in one batch. Last write
+   * for a cell wins, which matches batchUpdate's apply-in-order semantics —
+   * the sheet ends up with the same value as before, at a fraction of the
+   * write volume.
+   */
+  private async buildSheetWriteBatch(
+    sheetName: string,
+    rowIndex: number,
+    effectiveUpdates: Partial<Report>
+  ): Promise<{ range: string; values: string[][] }[]> {
+    const headers = await this.getHeaderRow(sheetName);
+
+    const getColLetter = (index: number): string => {
+        let col = '';
+        let n = index;
+        while (n >= 0) {
+            col = String.fromCharCode(65 + (n % 26)) + col;
+            n = Math.floor(n / 26) - 1;
+        }
+        return col;
+    };
+
+    const byRange = new Map<string, { range: string; values: string[][] }>();
 
     for (const [key, value] of Object.entries(effectiveUpdates)) {
         if (value === undefined) continue;
@@ -1942,7 +1953,7 @@ class ReportsService {
         const propHeaders = PROP_TO_HEADER[key as keyof Report];
 
         if (propHeaders) {
-            colIndex = headers.findIndex(h => 
+            colIndex = headers.findIndex(h =>
                 propHeaders.some(name => h.trim().toLowerCase() === name.trim().toLowerCase())
             );
         }
@@ -1966,36 +1977,146 @@ class ReportsService {
         else if (typeof value === 'object') stringValue = JSON.stringify(value);
         else stringValue = String(value);
 
-        batchData.push({ range: cellRange, values: [[stringValue]] });
+        byRange.set(cellRange, { range: cellRange, values: [[stringValue]] });
     }
 
-    if (batchData.length > 0) {
-        await sheets.spreadsheets.values.batchUpdate({
+    return Array.from(byRange.values());
+  }
+
+  /**
+   * Single write path shared by updateReport and the sync's batched push-back:
+   * one values.batchUpdate per call, with a bounded retry when the Sheets API
+   * hits its per-minute write quota (429). All-or-nothing — on failure the
+   * caller leaves rows unstamped so the next sync retries them.
+   */
+  private async writeBatchToSheets(batchData: { range: string; values: string[][] }[]): Promise<void> {
+    const sheets = await this.getSheets();
+    if (!SPREADSHEET_ID) throw new Error('GOOGLE_SHEET_ID is not defined');
+
+    const perform = () =>
+        sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
             requestBody: {
                 data: batchData,
                 valueInputOption: 'USER_ENTERED',
             },
         });
+
+    const isQuotaError = (error: unknown): boolean => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const status = (error as any)?.code ?? (error as any)?.status ?? (error as any)?.response?.status;
+        return status === 429;
+    };
+
+    try {
+        await perform();
+    } catch (error) {
+        if (!isQuotaError(error)) throw error;
+
+        // The quota resets on a per-minute window — back off instead of
+        // hammering the endpoint with more doomed requests.
+        for (const delayMs of [2000, 8000]) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            try {
+                await perform();
+                return;
+            } catch (retryError) {
+                if (!isQuotaError(retryError)) throw retryError;
+            }
+        }
+        throw error;
+    }
+  }
+
+  /**
+   * Merges existing evidence/video URLs from the authoritative row into an
+   * updates payload — deduped, with the edited-DOCX replacement rule.
+   */
+  private mergeEvidenceUrls(effectiveUpdates: Partial<Report>, currentReport: Partial<Report>): void {
+    const existingUrls = [
+        ...(Array.isArray(currentReport.evidence_urls) ? currentReport.evidence_urls : []),
+        ...(currentReport.evidence_url && !Array.isArray(currentReport.evidence_urls) ? [currentReport.evidence_url] : []),
+        ...(Array.isArray(currentReport.video_urls) ? currentReport.video_urls : []),
+        ...(currentReport.video_url && !Array.isArray(currentReport.video_urls) ? [currentReport.video_url] : [])
+    ];
+    const newUrls = [
+        ...(Array.isArray(effectiveUpdates.evidence_urls) ? effectiveUpdates.evidence_urls : []),
+        ...(effectiveUpdates.evidence_url ? [effectiveUpdates.evidence_url] : []),
+        ...(Array.isArray(effectiveUpdates.video_urls) ? effectiveUpdates.video_urls : []),
+        ...(effectiveUpdates.video_url ? [effectiveUpdates.video_url] : [])
+    ];
+
+    const hasNewEditedDocx = newUrls.some(u => {
+        const dec = decodeURIComponent(String(u || '')).toUpperCase();
+        return dec.includes('IRREGULARITY_REPORT_EDITED') && dec.includes('.DOCX');
+    });
+
+    let filteredExisting = existingUrls;
+    if (hasNewEditedDocx) {
+        filteredExisting = existingUrls.filter(u => {
+            const dec = decodeURIComponent(String(u || '')).toUpperCase();
+            return !(dec.includes('IRREGULARITY_REPORT_EDITED') && dec.includes('.DOCX'));
+        });
     }
 
-    this.invalidateCache();
-    // We just wrote effectiveUpdates to the sheet ourselves, so there's nothing
-    // fresher to protect against by reading it live back — that round-trip was
-    // costing every caller (notably the up-to-50-row sync push-back loop) 2
-    // extra Google Sheets API reads per report for a return value most callers
-    // don't even use, and was blowing through the per-minute read quota.
-    const existing = await this.getReportById(id, { skipLiveFetch: true });
-    if (existing) {
-        return syncEscalationDivisionAliases({ ...existing, ...effectiveUpdates });
+    effectiveUpdates.evidence_urls = [...new Set([...filteredExisting, ...newUrls])].filter(Boolean);
+  }
+
+  /**
+   * Batch push-back used by the sync loop: turns N dirty reports into ONE
+   * values.batchUpdate instead of N API calls, so a 50-row sync costs a
+   * single write request against the Sheets per-minute quota rather than 50.
+   * Returns the rows that were successfully pushed (all of them on success;
+   * on failure it throws and none are stamped, keeping them dirty for retry).
+   */
+  async updateReportsToSheets(
+    reports: Array<{ sheetId: string; report: Partial<Report> }>,
+    options: { skipLiveFetch?: boolean } = {}
+  ): Promise<Report[]> {
+    const allData: { range: string; values: string[][] }[] = [];
+    const pushed: Report[] = [];
+
+    for (const { sheetId, report } of reports) {
+        const originalId = sheetId.includes('!row_') ? sheetId : await this.resolveIdToOriginal(sheetId);
+        if (!originalId) continue;
+
+        const parsed = this.parseId(originalId);
+        if (!parsed) continue;
+
+        // Rare edge: a report whose tag no longer matches its sheet needs the
+        // recreate-as-new-row path — not a plain cell write.
+        if (report.primary_tag === 'CGO' && parsed.sheetName !== 'CGO') {
+            const recreated = await this.updateReport(originalId, report, options);
+            if (recreated) pushed.push(recreated);
+            continue;
+        }
+
+        const effectiveUpdates: Partial<Report> = { ...report };
+
+        if ('esklasi_divisi' in effectiveUpdates) {
+            syncEscalationDivisionAliases(effectiveUpdates);
+        }
+
+        if (['evidence_urls', 'evidence_url', 'video_urls', 'video_url'].some(k => k in effectiveUpdates)) {
+            // The sync pushes the full DB row, which is already the
+            // authoritative merge source — no live Sheets read needed.
+            this.mergeEvidenceUrls(effectiveUpdates, report);
+        }
+
+        const batchData = await this.buildSheetWriteBatch(parsed.sheetName, parsed.rowIndex, effectiveUpdates);
+        allData.push(...batchData);
+        pushed.push(report as Report);
     }
 
-    return {
-        id: id,
-        original_id: originalId,
-        sheet_id: originalId,
-        ...effectiveUpdates
-    } as Report;
+    if (allData.length > 0) {
+        await this.writeBatchToSheets(allData);
+    }
+
+    if (pushed.length > 0) {
+        this.invalidateCache();
+    }
+
+    return pushed;
   }
 
   async deleteReport(id: string): Promise<boolean> {
