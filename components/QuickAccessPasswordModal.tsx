@@ -17,6 +17,13 @@ interface QuickAccessPasswordModalProps {
     href: string;
 
     external?: boolean;
+
+    /** When set, verifies against the tile's own password (per-tile gate)
+     *  instead of the legacy env password, and calls onVerified() without
+     *  navigating. */
+    tileId?: string;
+
+    onVerified?: () => void;
 }
 
 export function QuickAccessPasswordModal({
@@ -25,10 +32,13 @@ export function QuickAccessPasswordModal({
     label,
     href,
     external = true,
+    tileId,
+    onVerified,
 }: QuickAccessPasswordModalProps) {
     const [value, setValue] = useState('');
     const [showPw, setShowPw] = useState(false);
     const [error, setError] = useState(false);
+    const [errorMessage, setErrorMessage] = useState('Incorrect password. Please try again.');
     const [shake, setShake] = useState(false);
     const [loading, setLoading] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -37,6 +47,7 @@ export function QuickAccessPasswordModal({
         if (isOpen) {
             setValue('');
             setError(false);
+            setErrorMessage('Incorrect password. Please try again.');
             setTimeout(() => inputRef.current?.focus(), 120);
         }
     }, [isOpen]);
@@ -45,15 +56,27 @@ export function QuickAccessPasswordModal({
         e.preventDefault();
         setLoading(true);
         try {
-            const res = await fetch('/api/auth/verify-quick-access', {
+            const res = await fetch(tileId ? '/api/quick-access/verify' : '/api/auth/verify-quick-access', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: value }),
+                body: JSON.stringify(tileId ? { tileId, password: value } : { password: value }),
             });
+            if (res.status === 429) {
+                const data = await res.json().catch(() => ({}));
+                setErrorMessage(data.error || 'Terlalu banyak percobaan. Coba lagi dalam 1 menit.');
+                setError(true);
+                setShake(true);
+                setTimeout(() => setShake(false), 500);
+                return;
+            }
             if (res.ok) {
                 const data = await res.json();
                 if (data.valid) {
                     onClose();
+                    if (tileId) {
+                        onVerified?.();
+                        return;
+                    }
                     if (external) {
                         window.open(href, '_blank', 'noopener,noreferrer');
                     } else {
@@ -67,6 +90,7 @@ export function QuickAccessPasswordModal({
         } finally {
             setLoading(false);
         }
+        setErrorMessage('Incorrect password. Please try again.');
         setError(true);
         setShake(true);
         setValue('');
@@ -171,7 +195,7 @@ export function QuickAccessPasswordModal({
                                     </div>
                                     {error && (
                                         <p className="text-xs text-red-500 font-medium">
-                                            Incorrect password. Please try again.
+                                            {errorMessage}
                                         </p>
                                     )}
                                 </div>

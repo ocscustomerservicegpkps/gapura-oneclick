@@ -14,6 +14,8 @@ import { type StatusUpdateDetails } from '@/components/dashboard/ReportDetailVie
 
 import { useExternalLinks } from '@/lib/hooks/useExternalLinks';
 import { useJoumpaReports } from '@/lib/hooks/useJoumpaReports';
+import { DashboardShareControls, type ShareControlAction } from '@/components/dashboard/share/DashboardShareControls';
+import { SHARE_TAB_SETS } from '@/lib/share/types';
 import { mergeReportUpdate } from '@/lib/report-cache';
 import { getLinkUrl } from '@/lib/external-links';
 import { ReportSourceToggle, matchesReportSource, type ReportSourceValue } from '@/components/dashboard/analyst/ReportSourceToggle';
@@ -610,6 +612,28 @@ export function OCSDivisionDashboard({
 
   const isOpDivision = division.code === 'OP';
 
+  // Share/presentation controls. OCS + OCS-analyst variants publish the OCS
+  // records tabs; other divisions publish the analyst tab set for their key.
+  const [shareActions, setShareActions] = useState<ShareControlAction[]>([]);
+  const shareDashboardKey = division.code === 'OCS' || division.code === 'ANALYST'
+    ? 'ocs'
+    : division.code.toLowerCase();
+  const shareTabs = SHARE_TAB_SETS[shareDashboardKey] ?? SHARE_TAB_SETS.analyst;
+  // Stable snapshot of current filters; the share dialog only resets to this
+  // when it opens, not on every dashboard re-render.
+  const shareInitialScope = useMemo(
+    () => ({
+      dateRange: typeof dateRange === 'object' ? undefined : dateRange,
+      dateFrom: typeof dateRange === 'object' ? dateRange.from : undefined,
+      dateTo: typeof dateRange === 'object' ? dateRange.to : undefined,
+      hubs: globalFilters.hubs,
+      stations: globalFilters.branches,
+      airlines: globalFilters.airlines,
+      categories: globalFilters.categories,
+    }),
+    [dateRange, globalFilters],
+  );
+
   if (loading) {
     return (
       <DashboardWorkspaceSkeleton
@@ -634,6 +658,16 @@ export function OCSDivisionDashboard({
         backgroundColor: 'var(--surface-0)',
       }}
     >
+      <DashboardShareControls
+        dashboardKey={shareDashboardKey}
+        tabs={shareTabs}
+        initialScope={shareInitialScope}
+        availableOptions={availableOptions}
+        onActions={setShareActions}
+        divisionCode={shareDashboardKey === 'ocs' ? 'OCS' : division.code}
+        filteredReports={filteredReports}
+        globalFilters={globalFilters}
+      />
       <div className="space-y-4 sm:space-y-6 md:space-y-8 pb-24 pt-0 px-3 sm:px-4 md:px-6 w-full max-w-none min-w-0 overflow-x-hidden">
         <PresentationSlide className="!p-3 sm:!p-4 md:!p-5 !min-h-0 !bg-[var(--surface-1)] !shadow-sm !border !border-[var(--surface-3)] rounded-xl sm:rounded-2xl md:rounded-[24px] !overflow-visible">
           <ResponsiveHeader
@@ -647,7 +681,7 @@ export function OCSDivisionDashboard({
             onExportExcel={exportToExcel}
             onExportPDF={exportToPDF}
             exporting={exporting}
-            divisionDashboardActions={undefined}
+            divisionDashboardActions={shareActions}
             onSwitchDivision={() => router.push('/dashboard/eskalasi/select')}
             variant={isOpDivision && !isScopeLocked ? 'op-executive' : 'default'}
             title={isOpDivision && !isScopeLocked ? 'Analytics Center' : division.code === 'OCS' ? 'Customer Service Division Report' : undefined}

@@ -68,28 +68,31 @@ const ReportsStatusTab = dynamic(
 );
 
 export interface AnalystChartsProps {
-    readonly analytics: AnalyticsData | null;
-    readonly caseCategoryData: readonly CaseCategoryItem[];
-    readonly branchReportData: readonly BranchReportItem[];
-    readonly monthlyReportData: readonly MonthlyReportItem[];
-    readonly categoryByAreaData: readonly CategoryByAreaItem[];
-    readonly categoryByBranchData: readonly CategoryByBranchItem[];
-    readonly areaSubCategoryData: readonly AreaSubCategoryItem[];
-    readonly categoryByAirlinesData: readonly CategoryByAirlinesItem[];
+    // Chart datasets are computed upstream (ChartSection) and declared for the
+    // authenticated call path; the component itself only consumes the reports
+    // + filters below, so the rest stay optional for read-only callers.
+    readonly analytics?: AnalyticsData | null;
+    readonly caseCategoryData?: readonly CaseCategoryItem[];
+    readonly branchReportData?: readonly BranchReportItem[];
+    readonly monthlyReportData?: readonly MonthlyReportItem[];
+    readonly categoryByAreaData?: readonly CategoryByAreaItem[];
+    readonly categoryByBranchData?: readonly CategoryByBranchItem[];
+    readonly areaSubCategoryData?: readonly AreaSubCategoryItem[];
+    readonly categoryByAirlinesData?: readonly CategoryByAirlinesItem[];
 
-    readonly monthlyComparisonData: readonly MonthlyComparisonItem[];
-    readonly hubDistributionData: readonly HubDistributionItem[];
-    readonly resolutionByBranchData: readonly ResolutionByBranchItem[];
-    readonly allReports: readonly Report[];
+    readonly monthlyComparisonData?: readonly MonthlyComparisonItem[];
+    readonly hubDistributionData?: readonly HubDistributionItem[];
+    readonly resolutionByBranchData?: readonly ResolutionByBranchItem[];
+    readonly allReports?: readonly Report[];
     readonly filteredReports: readonly Report[];
-    readonly caseReportByAreaData: readonly CaseReportByAreaBranchItem[];
-    readonly terminalAreaCategoryData: readonly CategoryCountItem[];
-    readonly apronAreaCategoryData: readonly CategoryCountItem[];
-    readonly generalCategoryData: readonly CategoryCountItem[];
+    readonly caseReportByAreaData?: readonly CaseReportByAreaBranchItem[];
+    readonly terminalAreaCategoryData?: readonly CategoryCountItem[];
+    readonly apronAreaCategoryData?: readonly CategoryCountItem[];
+    readonly generalCategoryData?: readonly CategoryCountItem[];
     readonly caseClassificationData?: readonly CategoryCountItem[];
     readonly comparisonData?: ComparisonData;
-    readonly onDrilldown: (url: string) => void;
-    readonly drilldownUrl: (type: string, value: string) => string;
+    readonly onDrilldown?: (url: string) => void;
+    readonly drilldownUrl?: (type: string, value: string) => string;
     readonly globalFilters: {
         hubs: string[];
         branches: string[];
@@ -109,6 +112,13 @@ export interface AnalystChartsProps {
         categories: string[];
     };
     readonly showDelayCodeTab?: boolean;
+    /** Read-only presentation/share mode: no filters, no tab bar when lockedTab
+     * is set, joumpa data comes from props instead of the protected endpoint. */
+    readonly readOnly?: boolean;
+    /** Per-tab share: render only this tab, no tab bar. null/undefined = all tabs. */
+    readonly lockedTab?: string | null;
+    /** Joumpa reports for read-only mode (fetched server-side by the share page). */
+    readonly joumpaReports?: readonly Report[];
 }
 
 export default function AnalystCharts({
@@ -117,6 +127,9 @@ export default function AnalystCharts({
     setGlobalFilters,
     availableOptions,
     showDelayCodeTab = false,
+    readOnly = false,
+    lockedTab = null,
+    joumpaReports,
 }: AnalystChartsProps) {
     const BASE_TABS = ['summary', 'sqi', 'joumpa', 'gse', 'cgo_cargo', 'status_details'] as const;
     const TABS = (showDelayCodeTab
@@ -131,7 +144,7 @@ export default function AnalystCharts({
         delay: 'Delay Code Report',
         status_details: (<><span className="block">Reports Status</span><span className="block">Details</span></>),
     };
-    const [activeTab, setActiveTab] = useState<string>('summary');
+    const [activeTab, setActiveTab] = useState<string>(lockedTab ?? 'summary');
     const [isGlobalFilterCollapsed, setIsGlobalFilterCollapsed] = useState(true);
     // Paint the tab bar + filter shell FIRST, then mount the heavy active-tab
     // content on a later task. Rendering the whole tree in one commit produced
@@ -143,12 +156,19 @@ export default function AnalystCharts({
         const id = setTimeout(() => setContentReady(true), 0);
         return () => clearTimeout(id);
     }, []);
+    // Public share passes joumpa data in (server-fetched, scope applied); the
+    // protected /api/joumpa endpoint is never called unauthenticated. Kiosk
+    // mode is authenticated but has no injected data, so the hook fetches.
+    const hasInjectedJoumpa = Boolean(joumpaReports);
     const {
-        reports: joumpaReports,
+        reports: hookJoumpaReports,
         error: joumpaError,
         isLoading: joumpaLoading,
-    } = useJoumpaReports(activeTab === 'joumpa');
-    const filteredJoumpaReports = joumpaReports.filter((report) => {
+    } = useJoumpaReports(activeTab === 'joumpa' && !(readOnly && hasInjectedJoumpa));
+    const joumpaReportsResolved = hasInjectedJoumpa ? joumpaReports : hookJoumpaReports;
+    const filteredJoumpaReports = readOnly && hasInjectedJoumpa
+        ? joumpaReportsResolved
+        : joumpaReportsResolved.filter((report) => {
         if (globalFilters.hubs.length > 0 && !globalFilters.hubs.includes(report.hub || '')) return false;
         const branch = report.stations?.code || report.station_code || report.branch || '';
         if (globalFilters.branches.length > 0 && !globalFilters.branches.includes(branch)) return false;
@@ -160,7 +180,7 @@ export default function AnalystCharts({
 
     return (
         <div className="space-y-6">
-            {}
+            {!readOnly && (
             <div className="relative z-50 bg-[oklch(1_0_0_/_0.4)] backdrop-blur-2xl border border-[oklch(1_0_0_/_0.1)] shadow-inner-rim rounded-2xl mb-4 sm:mb-6">
                 <div className="flex justify-between items-center px-4 sm:px-6 py-3 sm:py-4 border-b border-[oklch(1_0_0_/_0.05)]">
                     <h3 className="text-xs sm:text-sm font-bold text-[var(--text-primary)] uppercase tracking-wider flex items-center gap-2">
@@ -225,8 +245,9 @@ export default function AnalystCharts({
                     )}
                 </AnimatePresence>
             </div>
+            )}
 
-            {}
+            {!lockedTab && (
             <div className="flex justify-center sticky top-0 z-40 py-1 sm:py-2">
                 <div className="flex p-1 sm:p-1.5 rounded-2xl bg-[oklch(1_0_0_/_0.4)] backdrop-blur-2xl border border-[oklch(1_0_0_/_0.1)] shadow-inner-rim max-w-full overflow-x-auto no-scrollbar">
                     {TABS.map((tab) => (
@@ -256,8 +277,8 @@ export default function AnalystCharts({
                     ))}
                 </div>
             </div>
+            )}
 
-            {}
             {!contentReady && tabLoadingFallback}
             {contentReady && activeTab === 'summary' && <SummaryReportTab reports={filteredReports as Report[]} />}
             {contentReady && activeTab === 'sqi' && <ServiceQualityImprovementTab reports={filteredReports as Report[]} />}

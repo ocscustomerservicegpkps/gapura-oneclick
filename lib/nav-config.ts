@@ -5,7 +5,6 @@ import {
     Plane,
     ClipboardList,
     Users,
-    ChevronRight,
     Hash,
     FolderOpen,
     Shield,
@@ -16,6 +15,7 @@ import {
     Bell,
     BookOpen,
     QrCode,
+    LayoutGrid,
     type LucideIcon,
 } from 'lucide-react';
 
@@ -67,7 +67,6 @@ const LINKS_CONFIG: Record<string, NavGroupConfig[]> = {
             items: [
                 { href: '/dashboard/employee', label: 'My Reports', icon: FileText },
                 { href: '/dashboard/employee/new', label: 'Create Report', icon: Plane },
-                { href: '/dashboard/employee/quick-access', label: 'Quick Access', icon: ChevronRight },
                 { href: '/dashboard/employee/documents', label: 'Documents', icon: BookOpen },
             ]
         }
@@ -177,6 +176,7 @@ const LINKS_CONFIG: Record<string, NavGroupConfig[]> = {
                 { href: '/dashboard/admin/users', label: 'User Management', icon: Users },
                 { href: '/dashboard/admin/security', label: 'Security', icon: Shield },
                 { href: '/dashboard/admin/external-links', label: 'External Links', icon: Link2 },
+                { href: '/dashboard/admin/quick-access', label: 'Quick Access', icon: LayoutGrid },
             ]
         },
         {

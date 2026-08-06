@@ -57,7 +57,15 @@ const QRCodeWithLogo = dynamic(
   }
 );
 
-export function PublicReportWizard() {
+export function PublicReportWizard({
+    initialCategory = null,
+    hideGrid = false,
+    onClosed,
+}: {
+    initialCategory?: string | null;
+    hideGrid?: boolean;
+    onClosed?: () => void;
+}) {
   const router = useRouter();
 
   
@@ -633,6 +641,7 @@ export function PublicReportWizard() {
   const closeQuickAccess = () => {
     setFormData(prev => ({ ...prev, main_category: '' }));
     setStep(1);
+    onClosed?.();
   };
 
   /**
@@ -1163,6 +1172,15 @@ export function PublicReportWizard() {
     }
   };
 
+  // Form-only mode: when mounted with an initialCategory, open that category
+  // directly (the DB-driven grid handles tile selection instead).
+  useEffect(() => {
+    if (!initialCategory) return;
+    const cat = CATEGORIES.find((c) => c.id === initialCategory);
+    if (cat) openCategory(cat);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCategory]);
+
   if (success) {
     return (
       <LazyMotion features={domAnimation}>
@@ -1221,10 +1239,10 @@ export function PublicReportWizard() {
       <NoiseTexture opacity={0.02} />
       <GuestNav hideSidebar={true} hideMobileNav={true} />
 
-      {/* Bento Grid */}
+      {/* Bento Grid (hidden in form-only mode — the DB-driven grid renders instead) */}
       <main className="max-w-7xl mx-auto mb-32 relative z-10">
         {/* Card renderer shared between mobile + desktop */}
-        {(() => {
+        {!hideGrid && (() => {
           const renderCard = (cat: typeof CATEGORIES[number], idx: number, solo = false) => (
             <m.div
               key={cat.id}
@@ -1304,6 +1322,12 @@ export function PublicReportWizard() {
             </div>
           );
         })()}
+        {hideGrid && !initialCategory && (
+          <div className="mx-auto max-w-xl rounded-[32px] border border-dashed border-[oklch(0.15_0.02_200_/_0.15)] bg-white/60 p-12 text-center">
+            <p className="text-sm font-bold text-[oklch(0.40_0.02_200)]">Belum ada akses cepat.</p>
+            <p className="text-xs text-[oklch(0.50_0.02_200)] mt-1">Super admin bisa menambahkan section dan tile dari menu Quick Access.</p>
+          </div>
+        )}
       </main>
 
       {/* Portal Dialog */}

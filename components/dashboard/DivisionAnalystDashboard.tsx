@@ -36,6 +36,8 @@ import { useReportsData } from '@/hooks/use-reports-cache';
 import type { DivisionConfig } from '@/components/dashboard/AnalyticsDashboard';
 import { DashboardWorkspaceSkeleton } from '@/components/dashboard/DashboardWorkspaceSkeleton';
 import { useDrilldown } from '@/components/chart-detail/useDrilldown';
+import { DashboardShareControls, type ShareControlAction } from '@/components/dashboard/share/DashboardShareControls';
+import { SHARE_TAB_SETS } from '@/lib/share/types';
 
 const ReportsTableSection = dynamic(
   () =>
@@ -247,6 +249,12 @@ export function DivisionAnalystDashboard({
   });
 
   const needsCustomerFeedbackData = realDivisionCode === 'OS' && showFilterModal;
+
+  // Share/presentation controls: header actions are filled in once the
+  // component's data is ready (below), dialog + kiosk render here.
+  const [shareActions, setShareActions] = useState<ShareControlAction[]>([]);
+  const shareDashboardKey = division.code.toLowerCase();
+  const shareTabs = SHARE_TAB_SETS[shareDashboardKey] ?? SHARE_TAB_SETS.analyst;
 
   const handleScrollToTop = useCallback(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -843,6 +851,21 @@ export function DivisionAnalystDashboard({
   // executive header treatment as OP, but with its own copy.
   const isExecutiveDivision = isOpDivision || division.code === 'ANALYST';
 
+  // Stable snapshot of the current filters; the share dialog resets its editor
+  // to this only when it opens, not on every dashboard re-render.
+  const shareInitialScope = useMemo(
+    () => ({
+      dateRange: typeof dateRange === 'object' ? undefined : dateRange,
+      dateFrom: typeof dateRange === 'object' ? dateRange.from : undefined,
+      dateTo: typeof dateRange === 'object' ? dateRange.to : undefined,
+      hubs: globalFilters.hubs,
+      stations: globalFilters.branches,
+      airlines: globalFilters.airlines,
+      categories: globalFilters.categories,
+    }),
+    [dateRange, globalFilters],
+  );
+
   if (loading) {
     return (
       <DashboardWorkspaceSkeleton
@@ -867,6 +890,16 @@ export function DivisionAnalystDashboard({
         backgroundColor: 'var(--surface-0)',
       }}
     >
+      <DashboardShareControls
+        dashboardKey={shareDashboardKey}
+        tabs={shareTabs}
+        initialScope={shareInitialScope}
+        availableOptions={availableOptions}
+        onActions={setShareActions}
+        divisionCode={division.code}
+        filteredReports={filteredReports}
+        globalFilters={globalFilters}
+      />
       <div className="space-y-4 sm:space-y-6 md:space-y-8 pb-24 pt-0 px-3 sm:px-4 md:px-6 w-full max-w-none min-w-0 overflow-x-hidden">
         <PresentationSlide className="!p-3 sm:!p-4 md:!p-5 !min-h-0 !bg-[var(--surface-1)] !shadow-sm !border !border-[var(--surface-3)] rounded-xl sm:rounded-2xl md:rounded-[24px] !overflow-visible">
           <ResponsiveHeader
@@ -880,7 +913,7 @@ export function DivisionAnalystDashboard({
             onExportExcel={exportToExcel}
             onExportPDF={exportToPDF}
             exporting={null}
-            divisionDashboardActions={undefined}
+            divisionDashboardActions={shareActions}
             onSwitchDivision={() => router.push('/dashboard/eskalasi/select')}
             variant={isExecutiveDivision && !isScopeLocked ? 'op-executive' : 'default'}
             title={

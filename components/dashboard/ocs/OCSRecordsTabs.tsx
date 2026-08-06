@@ -15,7 +15,8 @@ import {
 } from '@/lib/excel-export-style';
 import { Search, Plus, Trash2, Pencil, ExternalLink, X, Loader2, ArrowUpDown, FileSpreadsheet, Filter, ChevronDown } from 'lucide-react';
 
-type Tab = 'weekly_report' | 'monthly_report' | 'survey_report' | 'reminder' | 'joumpa' | 'joumpa_uplifting' | 'rca';
+export type OcsRecordsTab = 'weekly_report' | 'monthly_report' | 'survey_report' | 'reminder' | 'joumpa' | 'joumpa_uplifting' | 'rca';
+type Tab = OcsRecordsTab;
 type FieldType = 'date' | 'text' | 'multiline' | 'url' | 'select';
 
 interface Col {
@@ -24,10 +25,20 @@ interface Col {
   type: FieldType;
 }
 
-interface OcsRecord {
+export interface OcsRecord {
   id: string;
   tab: Tab;
   [key: string]: string | null | undefined;
+}
+
+interface OCSRecordsTabsProps {
+  /** Read-only presentation/share mode: manage actions hidden, records come
+   * from initialRecords instead of the protected /api/ocs-records endpoint. */
+  readOnly?: boolean;
+  /** Per-tab share: render only this tab, no tab bar. null/undefined = all tabs. */
+  lockedTab?: Tab | null;
+  /** Records for read-only mode (server-fetched by the share page). */
+  initialRecords?: OcsRecord[];
 }
 
 const TABS: { id: Tab; label: string; display?: React.ReactNode; cols: Col[] }[] = [
@@ -175,21 +186,34 @@ async function exportToExcel(tab: (typeof TABS)[number], rows: OcsRecord[]) {
   URL.revokeObjectURL(url);
 }
 
-export default function OCSRecordsTabs() {
+export default function OCSRecordsTabs({
+  readOnly = false,
+  lockedTab = null,
+  initialRecords,
+}: OCSRecordsTabsProps = {}) {
   const { user } = useAuth(false);
-  const canManage = user?.role === 'SUPER_ADMIN' || (user?.role === 'ANALYST' && user?.division === 'OCS');
+  const canManage = readOnly ? false : user?.role === 'SUPER_ADMIN' || (user?.role === 'ANALYST' && user?.division === 'OCS');
 
-  const [active, setActive] = useState<Tab>('reminder');
+  const [active, setActive] = useState<Tab>(lockedTab ?? 'reminder');
   const tab = TABS.find((t) => t.id === active)!;
   // ponytail: weekly/monthly/survey reports split by Ground Handling vs Joumpa.
   // Reuses the unused 'pic' column as the discriminator instead of a migration.
   const isCategorized = active === 'weekly_report' || active === 'monthly_report' || active === 'survey_report';
   const [category, setCategory] = useState<'ground_handling' | 'joumpa'>('ground_handling');
 
-  const { data, mutate, isLoading } = useSWR<OcsRecord[]>(`/api/ocs-records?tab=${active}`, fetcher, {
-    revalidateOnFocus: false,
-  });
-  const records = useMemo(() => (Array.isArray(data) ? data : []), [data]);
+  const { data, mutate, isLoading } = useSWR<OcsRecord[]>(
+    readOnly ? null : `/api/ocs-records?tab=${active}`,
+    fetcher,
+    { revalidateOnFocus: false },
+  );
+  const records = useMemo(() => {
+    if (readOnly) {
+      return Array.isArray(initialRecords)
+        ? initialRecords.filter((record) => record.tab === active)
+        : [];
+    }
+    return Array.isArray(data) ? data : [];
+  }, [readOnly, initialRecords, active, data]);
 
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState('event_date');
@@ -258,6 +282,7 @@ export default function OCSRecordsTabs() {
   return (
     <div className="space-y-4">
       {/* Tab bar — exact OP style: frosted glass pill + framer-motion 3D active */}
+      {!lockedTab && (
       <div className="relative flex justify-center sticky top-0 z-40 py-1 sm:py-2">
         <div className="pointer-events-none absolute right-0 top-1 bottom-1 w-8 bg-gradient-to-l from-[var(--surface-0,#fff)] to-transparent sm:hidden" />
         <div className="flex p-1 sm:p-1.5 rounded-2xl bg-[oklch(1_0_0_/_0.4)] backdrop-blur-2xl border border-[oklch(1_0_0_/_0.1)] shadow-inner-rim max-w-full overflow-x-auto no-scrollbar">
@@ -288,6 +313,7 @@ export default function OCSRecordsTabs() {
           ))}
         </div>
       </div>
+      )}
 
       {/* Options — Ground Handling vs Joumpa, weekly/monthly/survey tabs only */}
       {isCategorized && (
@@ -318,6 +344,7 @@ export default function OCSRecordsTabs() {
         {/* Caption bar */}
         <div className="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--surface-2)] bg-[var(--surface-0)]/60">
           {/* Export */}
+          {!readOnly && (
           <button
             onClick={handleExport}
             disabled={exporting || rows.length === 0}
@@ -326,9 +353,10 @@ export default function OCSRecordsTabs() {
             {exporting ? <Loader2 size={12} className="animate-spin" /> : <FileSpreadsheet size={12} className="text-emerald-600" />}
             <span className="hidden sm:inline">Export</span>
           </button>
+          )}
 
           {/* Divider */}
-          <div className="h-5 w-px bg-[var(--surface-3)]" />
+          {!readOnly && <div className="h-5 w-px bg-[var(--surface-3)]" />}
 
           {/* Search */}
           <div className="relative flex-1 max-w-xs">

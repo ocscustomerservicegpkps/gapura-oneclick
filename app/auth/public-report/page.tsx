@@ -1,10 +1,12 @@
 
-import { Suspense } from 'react';
 import Image from 'next/image';
-import { StaticBentoGrid } from '@/components/public-report/StaticBentoGrid';
-import { PublicReportLoader } from '@/components/public-report/PublicReportLoader';
+import { PublicReportSection } from '@/components/public-report/PublicReportSection';
+import { getPublicQuickAccess } from '@/lib/quick-access-server';
 
-export default function PublicReportPage() {
+export default async function PublicReportPage() {
+  // SSR-render the grid config so the page shows instantly (like the old
+  // StaticBentoGrid) — the client board refreshes on mount.
+  const initialConfig = await getPublicQuickAccess().catch(() => null);
   return (
     <div className="min-h-screen relative bg-[oklch(0.98_0.01_200)] text-[oklch(0.15_0.02_200)] selection:bg-emerald-500/10 overflow-x-hidden">
       {}
@@ -27,14 +29,7 @@ export default function PublicReportPage() {
       </section>
 
       {}
-      <div id="bento-grid-ssr">
-        <StaticBentoGrid />
-      </div>
-
-      {}
-      <Suspense fallback={null}>
-        <PublicReportLoader />
-      </Suspense>
+      <PublicReportSection initialConfig={initialConfig} />
     </div>
   );
 }

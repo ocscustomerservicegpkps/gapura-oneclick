@@ -35,6 +35,8 @@ import type { DashboardOverview } from '@/lib/dashboard/contracts';
 import type { DivisionConfig } from '@/components/dashboard/AnalyticsDashboard';
 import { DashboardWorkspaceSkeleton } from '@/components/dashboard/DashboardWorkspaceSkeleton';
 import { useDrilldown } from '@/components/chart-detail/useDrilldown';
+import { DashboardShareControls, type ShareControlAction } from '@/components/dashboard/share/DashboardShareControls';
+import { SHARE_TAB_SETS } from '@/lib/share/types';
 
 const ReportsTableSection = dynamic(
   () =>
@@ -756,6 +758,25 @@ export function OSDivisionDashboard({
 
   const isOpDivision = division.code === 'OP';
 
+  // Share/presentation controls.
+  const [shareActions, setShareActions] = useState<ShareControlAction[]>([]);
+  const shareDashboardKey = division.code.toLowerCase();
+  const shareTabs = SHARE_TAB_SETS[shareDashboardKey] ?? SHARE_TAB_SETS.analyst;
+  // Stable snapshot of current filters; the share dialog only resets to this
+  // when it opens, not on every dashboard re-render.
+  const shareInitialScope = useMemo(
+    () => ({
+      dateRange: typeof dateRange === 'object' ? undefined : dateRange,
+      dateFrom: typeof dateRange === 'object' ? dateRange.from : undefined,
+      dateTo: typeof dateRange === 'object' ? dateRange.to : undefined,
+      hubs: globalFilters.hubs,
+      stations: globalFilters.branches,
+      airlines: globalFilters.airlines,
+      categories: globalFilters.categories,
+    }),
+    [dateRange, globalFilters],
+  );
+
   if (loading) {
     return (
       <DashboardWorkspaceSkeleton
@@ -780,6 +801,16 @@ export function OSDivisionDashboard({
         backgroundColor: 'var(--surface-0)',
       }}
     >
+      <DashboardShareControls
+        dashboardKey={shareDashboardKey}
+        tabs={shareTabs}
+        initialScope={shareInitialScope}
+        availableOptions={availableOptions}
+        onActions={setShareActions}
+        divisionCode={division.code}
+        filteredReports={filteredReports}
+        globalFilters={globalFilters}
+      />
       <div className="space-y-4 sm:space-y-6 md:space-y-8 pb-24 pt-0 px-3 sm:px-4 md:px-6 w-full max-w-none min-w-0 overflow-x-hidden">
         <PresentationSlide className="!p-3 sm:!p-4 md:!p-5 !min-h-0 !bg-[var(--surface-1)] !shadow-sm !border !border-[var(--surface-3)] rounded-xl sm:rounded-2xl md:rounded-[24px] !overflow-visible">
           <ResponsiveHeader
@@ -793,7 +824,7 @@ export function OSDivisionDashboard({
             onExportExcel={exportToExcel}
             onExportPDF={exportToPDF}
             exporting={exporting}
-            divisionDashboardActions={undefined}
+            divisionDashboardActions={shareActions}
             onSwitchDivision={() => router.push('/dashboard/eskalasi/select')}
             variant={isOpDivision && !isScopeLocked ? 'op-executive' : 'default'}
             title={isOpDivision && !isScopeLocked ? 'Analytics Center' : undefined}

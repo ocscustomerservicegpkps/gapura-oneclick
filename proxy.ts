@@ -90,6 +90,8 @@ export default async function proxy(request: NextRequest) {
     const isGoogleSheetsWebhook = path === '/api/integrations/google-sheets/webhook';
     const isDevelopment = process.env.NODE_ENV === 'development';
     const isPublicEmbedPath = path.startsWith('/embed') ||
+                             path.startsWith('/share') ||
+                             path.startsWith('/api/quick-access') ||
                              path.startsWith('/api/master-data') ||
                              path.startsWith('/api/reports/public') ||
                              path.startsWith('/api/reports/duplicates/check') ||

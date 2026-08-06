@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, MapPin, Plane, AlertTriangle, Link as LinkIcon, ClipboardList, Tag, FileText, Route, Building2, ChevronDown, ChevronUp, CalendarDays, CheckCircle, Edit3, Loader } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePathname } from 'next/navigation';
 import type { Report } from '@/types';
 import { normalizeSeverityLevel } from '@/lib/constants/report-status';
 import { StatusUpdateSuccessDialog } from '@/components/dashboard/StatusUpdateSuccessDialog';
@@ -44,6 +45,8 @@ function getSeverity(record: DrawerRecord): string {
 
 export function DrilldownDrawer({ isOpen, onClose, title, data }: DrilldownDrawerProps) {
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  // Public /share/* pages are read-only: no status mutations from there.
+  const isPublicShare = (usePathname() || '').startsWith('/share');
   const [statusForms, setStatusForms] = useState<Record<string, StatusFormState>>({});
   const [showStatusForm, setShowStatusForm] = useState<Record<string, boolean>>({});
   const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>({});
@@ -402,6 +405,7 @@ export function DrilldownDrawer({ isOpen, onClose, title, data }: DrilldownDrawe
                           <span className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-wide ${getStatusTone(status)}`}>
                             {status}
                           </span>
+                          {!isPublicShare && (
                           <button
                             type="button"
                             onClick={() => toggleStatusForm(rowKey, status)}
@@ -411,12 +415,13 @@ export function DrilldownDrawer({ isOpen, onClose, title, data }: DrilldownDrawe
                             <Edit3 size={11} strokeWidth={2.5} />
                             Change Status
                           </button>
+                          )}
                         </div>
                       </div>
 
                       {}
                       <AnimatePresence initial={false}>
-                        {isStatusOpen && (
+                        {isStatusOpen && !isPublicShare && (
                           <motion.div
                             initial={{ opacity: 0, height: 0 }}
                             animate={{ opacity: 1, height: 'auto' }}
