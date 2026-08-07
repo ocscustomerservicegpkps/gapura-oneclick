@@ -289,7 +289,7 @@ export default function AnalystCharts({
                     </div>
                 ) : (
                     <JoumpaServiceTab
-                        allReports={joumpaReports as Report[]}
+                        allReports={joumpaReportsResolved as Report[]}
                         reports={filteredJoumpaReports as Report[]}
                     />
                 )
