@@ -48,6 +48,11 @@ export function PublicQuickAccessBoard({ onOpenWizard, initialConfig = null }: P
     useEffect(() => { void fetchConfig(); }, [fetchConfig]);
 
     const handleTileClick = (tile: QuickAccessTileDTO) => {
+        // Maintenance mode: tile is under maintenance, show dialog.
+        if (tile.is_maintenance) {
+            setMaintenanceTile(tile);
+            return;
+        }
         // AI tile: enabled → straight to the virtual assistant, no modal.
         if (tile.gated_by === 'ai_enabled') {
             if (config?.aiEnabled) {

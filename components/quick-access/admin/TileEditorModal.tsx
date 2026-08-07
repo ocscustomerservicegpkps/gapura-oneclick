@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { X, Plus, Trash2, Loader2, AlertCircle, Eye, EyeOff } from 'lucide-react';
+import { X, Plus, Trash2, Loader2, AlertCircle } from 'lucide-react';
 import {
     SPAN_LABELS,
     FORM_FIELD_TYPES,
@@ -59,6 +59,7 @@ export function TileEditorModal({ tile, sectionId, onClose, onSave, isSaving }: 
     const [dialogType, setDialogType] = useState<DialogType>(() => initialDialogType(tile));
     const [span, setSpan] = useState<QASpan>(tile?.span || '1x1');
     const [isVisible, setIsVisible] = useState(tile?.is_visible ?? true);
+    const [isMaintenance, setIsMaintenance] = useState(tile?.is_maintenance ?? false);
 
     const existingContent = tile?.content as Record<string, unknown> | undefined;
     const [qrLinks, setQrLinks] = useState<QrRow[]>(
@@ -119,6 +120,7 @@ export function TileEditorModal({ tile, sectionId, onClose, onSave, isSaving }: 
             wizard_category: isWizard ? dialogType.slice('wizard-'.length) : null,
             content,
             is_visible: isVisible,
+            is_maintenance: isMaintenance,
             section_id: sectionId,
         };
         if (tile) body.id = tile.id;
@@ -289,17 +291,44 @@ export function TileEditorModal({ tile, sectionId, onClose, onSave, isSaving }: 
                                 ))}
                             </select>
                         </Field>
-                        <div>
-                            <span className="block text-[10px] font-black uppercase tracking-widest text-black/50 mb-1">Tampil</span>
+                    </div>
+
+                    {/* Toggles: Visibility + Maintenance */}
+                    <div className="space-y-3 p-4 rounded-xl border border-black/5 bg-black/[0.02]">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <span className="text-sm font-extrabold">Tampilkan Tile</span>
+                                <p className="text-[11px] text-black/40 font-medium">Nonaktifkan untuk menyembunyikan tile dari quick access</p>
+                            </div>
                             <button
                                 type="button"
                                 onClick={() => setIsVisible((v) => !v)}
-                                className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl border text-sm font-bold transition-all ${
-                                    isVisible ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-black/10 text-black/50'
+                                className={`relative w-10 h-6 rounded-full transition-colors ${
+                                    isVisible ? 'bg-emerald-600' : 'bg-black/15'
                                 }`}
+                                role="switch"
+                                aria-checked={isVisible}
+                                aria-label="Toggle tampil tile"
                             >
-                                <span>{isVisible ? 'Tampil di quick access' : 'Tersembunyi'}</span>
-                                {isVisible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                                <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${isVisible ? 'left-[18px]' : 'left-0.5'}`} />
+                            </button>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <span className="text-sm font-extrabold">Mode Maintenance</span>
+                                <p className="text-[11px] text-black/40 font-medium">Jika aktif, tile menampilkan dialog &ldquo;sedang maintenance&rdquo; saat diklik</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setIsMaintenance((v) => !v)}
+                                className={`relative w-10 h-6 rounded-full transition-colors ${
+                                    isMaintenance ? 'bg-amber-500' : 'bg-black/15'
+                                }`}
+                                role="switch"
+                                aria-checked={isMaintenance}
+                                aria-label="Toggle maintenance tile"
+                            >
+                                <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${isMaintenance ? 'left-[18px]' : 'left-0.5'}`} />
                             </button>
                         </div>
                     </div>

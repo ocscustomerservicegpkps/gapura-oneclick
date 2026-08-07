@@ -67,6 +67,9 @@ function normalizeTileFields(body: Record<string, unknown>, isCreate: boolean): 
     if (typeof body.is_visible === 'boolean') {
         updates.is_visible = body.is_visible;
     }
+    if (typeof body.is_maintenance === 'boolean') {
+        updates.is_maintenance = body.is_maintenance;
+    }
     if (body.gated_by !== undefined) {
         const gatedBy = body.gated_by === null ? null : String(body.gated_by);
         if (gatedBy !== null && gatedBy !== 'ai_enabled') {

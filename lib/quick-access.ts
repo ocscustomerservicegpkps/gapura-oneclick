@@ -83,6 +83,7 @@ export interface QuickAccessTileDTO {
     gated_by: QAGateBy;
     wizard_category: QAWizardCategory;
     is_password_protected: boolean;
+    is_maintenance: boolean;
     sort_order: number;
 }
 

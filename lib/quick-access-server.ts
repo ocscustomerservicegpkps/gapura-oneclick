@@ -37,7 +37,7 @@ async function getSettings(): Promise<{ ai_enabled: boolean; quick_access_enable
 // ── Public config (employee page) ────────────────────────────────────────
 
 /** Explicit column list — password_hash is NEVER selected here. */
-const PUBLIC_TILE_COLUMNS = 'id, section_id, title, description, icon, color, span, display_mode, content, is_visible, gated_by, wizard_category, is_password_protected, sort_order';
+const PUBLIC_TILE_COLUMNS = 'id, section_id, title, description, icon, color, span, display_mode, content, is_visible, is_maintenance, gated_by, wizard_category, is_password_protected, sort_order';
 
 export async function getPublicQuickAccess(): Promise<QuickAccessConfigDTO> {
     const settings = await getSettings();
@@ -66,7 +66,11 @@ export async function getPublicQuickAccess(): Promise<QuickAccessConfigDTO> {
         is_visible: s.is_visible,
         tiles: (tilesRes.data || [])
             .filter((t) => t.section_id === s.id)
-            .map((t) => ({ ...t, content: t.content as QATileContent })),
+            .map((t) => ({
+                ...t,
+                content: t.content as QATileContent,
+                is_maintenance: t.is_maintenance ?? false,
+            })),
     }));
 
     return {
