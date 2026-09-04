@@ -91,14 +91,25 @@ export async function purgeDashboardSnapshots(options?: {
   dashboardSlug?: string;
   maxSyncVersion?: number;
 }): Promise<void> {
+  // Both filters optional meant `purgeDashboardSnapshots()` — or a call whose
+  // slug resolved to undefined — issued an unfiltered DELETE and emptied the
+  // whole cache table. A purge with nothing to scope it is a mistake, not a
+  // request to delete everything.
+  // `Number.isFinite`, not `typeof === 'number'`: every caller passes
+  // `Number(state.sync_version)`, which is NaN whenever that column is missing.
+  const hasVersion = Number.isFinite(options?.maxSyncVersion);
+  if (!options?.dashboardSlug && !hasVersion) {
+    throw new Error('purgeDashboardSnapshots requires dashboardSlug or a finite maxSyncVersion');
+  }
+
   let query = supabaseAdmin.from('dashboard_cache_entries').delete();
 
   if (options?.dashboardSlug) {
     query = query.eq('dashboard_slug', options.dashboardSlug);
   }
 
-  if (typeof options?.maxSyncVersion === 'number') {
-    query = query.lt('sync_version', options.maxSyncVersion);
+  if (hasVersion) {
+    query = query.lt('sync_version', options!.maxSyncVersion!);
   }
 
   const { error } = await query;

@@ -62,6 +62,11 @@ const ROLE_DIVISION: Record<string, string> = {
     DIVISI_HT: 'HT',
 };
 
+// OP's dashboard lives at /dashboard/operasional; /dashboard/op is a 404.
+function divisionDashboardPath(code: string): string {
+    return code === 'OP' ? '/dashboard/operasional' : `/dashboard/${code.toLowerCase()}`;
+}
+
 interface DivisionSelectClientProps {
     role: string;
     division: string | null;
@@ -87,7 +92,7 @@ export function DivisionSelectClient({ role, division }: DivisionSelectClientPro
 
     useEffect(() => {
         visibleCards.forEach((card) => {
-            router.prefetch(card.href ?? `/dashboard/${card.code.toLowerCase()}`);
+            router.prefetch(card.href ?? divisionDashboardPath(card.code));
         });
     }, [router, visibleCards]);
 
@@ -116,7 +121,7 @@ export function DivisionSelectClient({ role, division }: DivisionSelectClientPro
             // switches back to the eskalasi account — hiding the OCS-only green card.
             void mutate('/api/auth/bundle');
 
-            const redirectPath = data?.redirectPath || `/dashboard/${code.toLowerCase()}`;
+            const redirectPath = data?.redirectPath || divisionDashboardPath(code);
             router.replace(redirectPath);
             router.refresh();
         } catch (err) {
@@ -142,13 +147,8 @@ export function DivisionSelectClient({ role, division }: DivisionSelectClientPro
             return;
         }
 
-        if (code === 'OP') {
-            router.push('/dashboard/op');
-            return;
-        }
-
-        if (code === 'OCS') {
-            router.push('/dashboard/ocs');
+        if (code === 'OP' || code === 'OCS') {
+            router.push(divisionDashboardPath(code));
         }
     };
 

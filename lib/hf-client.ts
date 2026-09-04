@@ -79,6 +79,21 @@ interface HfClientStats {
 const MAX_CACHE_SIZE = 500;
 
 /**
+ * `parseInt` returns NaN for a typo'd or empty-after-trim env value, and the
+ * `||` default only catches an unset variable — so `HF_TIMEOUT_MS=2min` used to
+ * produce NaN and silently disable the timeout, the rate limiter, or the cache
+ * TTL depending on which one it landed in. A value that cannot be read falls
+ * back to the documented default instead.
+ */
+function intEnv(raw: string | undefined, fallback: number, min: number): number {
+  const parsed = Number.parseInt(String(raw ?? ''), 10);
+  return Number.isFinite(parsed) && parsed >= min ? parsed : fallback;
+}
+
+const positiveIntEnv = (raw: string | undefined, fallback: number) => intEnv(raw, fallback, 1);
+const nonNegativeIntEnv = (raw: string | undefined, fallback: number) => intEnv(raw, fallback, 0);
+
+/**
  * Konfigurasi default untuk HfClient
  * Nilai-nilai ini dapat di-override dengan environment variable atau parameter
  */
@@ -90,11 +105,11 @@ const DEFAULT_CONFIG: HfClientConfig = {
   apiKey: typeof window !== 'undefined'
     ? ''
     : (process.env.ML_SERVICE_API_KEY || process.env.AI_SERVICE_API_KEY || ''),
-  rateLimitRpm: parseInt(process.env.HF_RATE_LIMIT_RPM || '100', 10),
-  cacheTtlMs: parseInt(process.env.HF_CACHE_TTL_MS || '900000', 10),
-  maxRetries: parseInt(process.env.HF_MAX_RETRIES || '3', 10),
-  timeoutMs: parseInt(process.env.HF_TIMEOUT_MS || '120000', 10),
-  retryBackoffMs: parseInt(process.env.HF_RETRY_BACKOFF_MS || '1000', 10),
+  rateLimitRpm: positiveIntEnv(process.env.HF_RATE_LIMIT_RPM, 100),
+  cacheTtlMs: positiveIntEnv(process.env.HF_CACHE_TTL_MS, 900_000),
+  maxRetries: nonNegativeIntEnv(process.env.HF_MAX_RETRIES, 3),
+  timeoutMs: positiveIntEnv(process.env.HF_TIMEOUT_MS, 120_000),
+  retryBackoffMs: positiveIntEnv(process.env.HF_RETRY_BACKOFF_MS, 1_000),
 };
 
 /**

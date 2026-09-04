@@ -3,8 +3,10 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { verifySession } from '@/lib/auth-utils';
 import { compressToExactSize } from '@/lib/image-compression';
-import { validateImageFile } from '@/lib/security/file-validation';
+import { validateEvidenceBuffer } from '@/lib/security/file-validation';
+import { checkEvidenceFile, extensionForUpload } from '@/lib/evidence-mime';
 import { normalizeEvidenceSubmissionId, recordEvidenceUpload } from '@/lib/evidence-files';
+import { compressEvidenceVideo } from '@/lib/video-compression';
 import { deleteDriveFile, sha256Hex, uploadEvidenceToDrive } from '@/lib/google-drive';
 
 export async function POST(request: Request) {
@@ -23,45 +25,47 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'File is required' }, { status: 400 });
     }
 
-    if (!file.type.startsWith('image/')) {
-      return NextResponse.json({ error: 'Only image files are allowed' }, { status: 400 });
+    const check = checkEvidenceFile({ name: file.name, type: file.type, size: file.size });
+    if (!check.ok) {
+      return NextResponse.json({ error: check.error }, { status: check.tooLarge ? 413 : 400 });
     }
-
-    const MAX_BYTES = 10 * 1024 * 1024;
-    if (file.size > MAX_BYTES) {
-      return NextResponse.json({ error: 'File too large (max 10MB)' }, { status: 413 });
-    }
-
+    const kind = check.kind;
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    const validation = validateImageFile(buffer, file.type);
+    const validation = validateEvidenceBuffer(buffer, kind, file.type);
     if (!validation.valid) {
         console.warn(`[UPLOAD] File validation failed: ${validation.error}`);
-        return NextResponse.json({ error: 'Invalid image file' }, { status: 400 });
+        return NextResponse.json({ error: 'File content does not match its type' }, { status: 400 });
     }
 
     let compressedBuffer: Buffer;
     let contentType: string;
+    let ext = extensionForUpload(kind, file.type, file.name);
 
-    try {
-      const result = await compressToExactSize(buffer);
+    if (kind === 'image') {
+      try {
+        const result = await compressToExactSize(buffer);
+        compressedBuffer = result.buffer;
+        contentType = 'image/webp';
+        ext = 'webp';
+      } catch (error) {
+        console.error('[UPLOAD] Compression failed, using original:', error);
+        compressedBuffer = buffer;
+        contentType = file.type;
+      }
+    } else if (kind === 'video') {
+      const result = await compressEvidenceVideo(buffer, file.type, ext);
       compressedBuffer = result.buffer;
-      contentType = 'image/webp';
-
-    } catch (error) {
-      console.error('[UPLOAD] Compression failed, using original:', error);
+      contentType = result.mimeType;
+      ext = result.ext;
+    } else {
+      // Documents are stored byte-for-byte — re-encoding would corrupt them.
       compressedBuffer = buffer;
       contentType = file.type;
     }
 
-    if (compressedBuffer.length > 5 * 1024) {
-      console.warn(`[UPLOAD] Compressed file still large: ${(compressedBuffer.length / 1024).toFixed(2)}KB`);
-    }
-
-    const ext = contentType.includes('webp') ? 'webp' :
-                contentType.includes('png') ? 'png' : 'jpg';
     const submissionId = normalizeEvidenceSubmissionId(form.get('evidence_submission_id'));
     const originalBaseName = file.name.replace(/\.[^.]+$/, '') || 'evidence';
     const driveFileName = `${Date.now()}-${originalBaseName}.${ext}`;

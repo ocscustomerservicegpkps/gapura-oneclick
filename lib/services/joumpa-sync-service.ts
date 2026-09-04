@@ -100,6 +100,9 @@ export class JoumpaSyncService {
       const pushed = await this.pushLocalUpdatesToSheets(headers);
 
       // 2. Pull: Sheets -> Supabase (upsert by sheet_id, deterministic id)
+      // Taken before the read: a row written after this instant cannot be in the
+      // snapshot we are about to fetch, so the orphan sweep must not judge it.
+      const snapshotAt = new Date().toISOString();
       const { rows } = await this.fetchSheet();
       let upsertErrors = 0;
       for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
@@ -114,7 +117,7 @@ export class JoumpaSyncService {
       }
 
       // 3. Delete rows removed from the sheet
-      const deleted = await this.deleteOrphans(rows);
+      const deleted = await this.deleteOrphans(rows, snapshotAt);
 
       return {
         success: upsertErrors === 0,
@@ -134,13 +137,18 @@ export class JoumpaSyncService {
   // The default PostgREST/Supabase row cap (1000) means a single unpaginated
   // select silently truncates on large tables, making every row past the cap
   // look orphaned. Page through with a stable order until a short page ends it.
-  private static async fetchAllSyncRowIds(): Promise<{ id: string; sheet_id: string }[]> {
+  private static async fetchAllSyncRowIds(snapshotAt: string): Promise<{ id: string; sheet_id: string }[]> {
     const allRows: { id: string; sheet_id: string }[] = [];
     let from = 0;
     for (;;) {
       const { data, error } = await supabaseAdmin
         .from('joumpa_reports_sync')
         .select('id, sheet_id')
+        // Only rows that existed when the sheet snapshot was taken. A public
+        // form submission landing mid-sync is absent from that snapshot through
+        // no fault of its own, and deleting it also loses its user_id — which
+        // the sheet has no column for, so a later pull cannot restore it.
+        .lt('synced_at', snapshotAt)
         .order('id', { ascending: true })
         .range(from, from + ORPHAN_SCAN_PAGE - 1);
       if (error) throw error;
@@ -152,7 +160,7 @@ export class JoumpaSyncService {
     return allRows;
   }
 
-  private static async deleteOrphans(rows: JoumpaRow[]): Promise<number> {
+  private static async deleteOrphans(rows: JoumpaRow[], snapshotAt: string): Promise<number> {
     // Fail closed: an empty fetch is far more likely a transient Sheets error
     // (429/5xx, quota, hidden sheet) than the user deleting every row. Deleting
     // orphans here would wipe the entire table. Mirror the canonical reports-sync
@@ -164,7 +172,7 @@ export class JoumpaSyncService {
     const currentSheetIds = new Set(rows.map((row) => row.sheet_id));
     let allRows: { id: string; sheet_id: string }[];
     try {
-      allRows = await this.fetchAllSyncRowIds();
+      allRows = await this.fetchAllSyncRowIds(snapshotAt);
     } catch (error) {
       console.warn('[JoumpaSync] orphan fetch failed:', error instanceof Error ? error.message : String(error));
       return 0;

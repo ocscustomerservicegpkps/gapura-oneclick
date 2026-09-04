@@ -5,6 +5,9 @@ import { verifySession } from '@/lib/auth-utils';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { randomUUID } from 'crypto';
 import { compressToExactSize } from '@/lib/image-compression';
+import { checkEvidenceFile, extensionForUpload } from '@/lib/evidence-mime';
+import { validateEvidenceBuffer } from '@/lib/security/file-validation';
+import { compressEvidenceVideo } from '@/lib/video-compression';
 import { reportsService } from '@/lib/services/reports-service';
 
 const ELEVATED_ROLES = ['SUPER_ADMIN', 'ANALYST', 'DIVISI_ESKALASI', 'DIVISI_OP', 'DIVISI_OS', 'DIVISI_OCS', 'DIVISI_OT', 'DIVISI_UQ', 'DIVISI_HC', 'DIVISI_HT', 'MANAGER_CABANG'];
@@ -53,51 +56,61 @@ export async function POST(
       return NextResponse.json({ error: 'File is required' }, { status: 400 });
     }
 
-    const isImage = file.type.startsWith('image/');
-    const isDoc = [
-      'application/pdf',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    ].includes(file.type);
-
-    if (!isImage && !isDoc) {
-      return NextResponse.json({ error: 'Only images and documents (PDF/Word) are allowed' }, { status: 400 });
+    const check = checkEvidenceFile({ name: file.name, type: file.type, size: file.size });
+    if (!check.ok) {
+      return NextResponse.json({ error: check.error }, { status: check.tooLarge ? 413 : 400 });
     }
-
-    const MAX_BYTES = 20 * 1024 * 1024;
-    if (file.size > MAX_BYTES) {
-      return NextResponse.json({ error: 'File too large (max 20MB)' }, { status: 413 });
-    }
-
+    const kind = check.kind;
 
     const arrayBuffer = await file.arrayBuffer();
+    const sourceBuffer = Buffer.from(arrayBuffer);
+
+    const validation = validateEvidenceBuffer(sourceBuffer, kind, file.type);
+    if (!validation.valid) {
+      console.warn(`[EVIDENCE UPLOAD] File validation failed: ${validation.error}`);
+      return NextResponse.json({ error: 'File content does not match its type' }, { status: 400 });
+    }
+
     let uploadBuffer: Buffer;
     let contentType = file.type;
+    let ext = extensionForUpload(kind, file.type, file.name);
 
-    let compressed = false;
-    if (isImage) {
+    if (kind === 'image') {
       try {
 
         const result = await compressToExactSize(arrayBuffer);
         uploadBuffer = result.buffer;
         contentType = 'image/webp';
-        compressed = true;
+        ext = 'webp';
       } catch (error) {
         console.error('[EVIDENCE UPLOAD] Compression failed, using original:', error);
-        uploadBuffer = Buffer.from(arrayBuffer);
+        uploadBuffer = sourceBuffer;
       }
+    } else if (kind === 'video') {
+      const result = await compressEvidenceVideo(sourceBuffer, file.type, ext);
+      uploadBuffer = result.buffer;
+      contentType = result.mimeType;
+      ext = result.ext;
     } else {
 
-      uploadBuffer = Buffer.from(arrayBuffer);
+      uploadBuffer = sourceBuffer;
     }
 
-    const ext = compressed ? 'webp' : (file.name.split('.').pop() || 'tmp');
     let fileName = file.name.replace(/\.[^.]+$/, "");
     fileName = `${fileName}_${randomUUID().slice(0, 8)}.${ext}`;
 
     fileName = fileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
-    const path = `reports/${id}/${fileName}`;
+    // `id` is a route parameter and went into the object key untouched, while
+    // fileName right above it was carefully sanitised — so `..%2f..` in the id
+    // walked the upload straight out of its report's folder. Same allowlist,
+    // and pure-dot segments are rejected outright since `.` is permitted.
+    const safeId = id.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    if (!safeId || /^\.+$/.test(safeId)) {
+      return NextResponse.json({ error: 'Invalid report id' }, { status: 400 });
+    }
+
+    const path = `reports/${safeId}/${fileName}`;
 
     const { error: uploadErr } = await supabaseAdmin.storage
       .from('evidence')
@@ -105,7 +118,9 @@ export async function POST(
 
     if (uploadErr) {
       console.error('[EVIDENCE UPLOAD] Supabase storage error:', uploadErr);
-      return NextResponse.json({ error: uploadErr.message, details: uploadErr }, { status: 500 });
+      // The raw storage error names buckets and internal paths; the caller gets
+      // the status, the detail stays in the log.
+      return NextResponse.json({ error: 'Gagal mengunggah evidence' }, { status: 500 });
     }
 
     const { data: pub } = supabaseAdmin.storage.from('evidence').getPublicUrl(path);

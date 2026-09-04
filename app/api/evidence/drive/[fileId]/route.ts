@@ -21,6 +21,18 @@ const GLOBAL_EVIDENCE_ROLES = new Set([
   'PARTNER_HT',
 ]);
 
+/**
+ * Types the browser renders as media rather than as a document. Deliberately
+ * excludes text/html and image/svg+xml, both of which execute script when
+ * rendered inline from this origin.
+ */
+const INLINE_SAFE_TYPES = new Set([
+  'application/pdf',
+  'image/jpeg', 'image/pjpeg', 'image/png', 'image/gif', 'image/webp',
+  'image/bmp', 'image/tiff', 'image/heic', 'image/heif',
+  'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp', 'video/mpeg',
+]);
+
 function normalizeAccessValue(value: unknown) {
   return String(value || '').trim().toLowerCase();
 }
@@ -59,12 +71,15 @@ async function canViewEvidence(
   }
 
   if (role === 'STAFF_CABANG' || role === 'CABANG' || role === 'EMPLOYEE') {
-    const payloadName = normalizeAccessValue(payload.full_name);
+    // reporter_name is deliberately not an ownership signal. It is free text
+    // typed into the public form, it is not unique, and nothing verifies it —
+    // so anyone sharing a name with a reporter, or willing to type theirs,
+    // could read that reporter's evidence. The same reasoning already governs
+    // the PATCH/DELETE handlers in app/api/reports/[id]/route.ts.
     return Boolean(
       report.user_id === payload.id ||
       (payload.station_id && report.station_id === payload.station_id) ||
-      (payloadEmail && normalizeAccessValue(report.reporter_email) === payloadEmail) ||
-      (payloadName && normalizeAccessValue(report.reporter_name) === payloadName)
+      (payloadEmail && normalizeAccessValue(report.reporter_email) === payloadEmail)
     );
   }
 
@@ -105,14 +120,25 @@ export async function GET(
     const file = await downloadDriveFile(fileId);
     const filename = sanitizeFilename(evidence.original_name);
 
+    // The stored mime_type is echoed straight back on this app's own origin, so
+    // `inline` on an arbitrary type is an XSS primitive: one row whose
+    // mime_type is text/html or image/svg+xml renders as a first-party document
+    // with access to the session cookie. Only types the browser renders as
+    // media are shown inline; everything else downloads.
+    const contentType = evidence.mime_type || 'application/octet-stream';
+    const disposition = INLINE_SAFE_TYPES.has(contentType) ? 'inline' : 'attachment';
+
     return new Response(new Uint8Array(file), {
       status: 200,
       headers: {
         'Cache-Control': 'private, no-store, max-age=0',
-        'Content-Disposition': `inline; filename="${filename}"`,
+        'Content-Disposition': `${disposition}; filename="${filename}"`,
         'Content-Length': String(file.length),
-        'Content-Type': evidence.mime_type || 'application/octet-stream',
+        'Content-Type': contentType,
         'X-Content-Type-Options': 'nosniff',
+        // Second line of defence for anything that does render: no subresources,
+        // no scripts, opaque origin.
+        'Content-Security-Policy': "default-src 'none'; sandbox",
       },
     });
   } catch (error) {

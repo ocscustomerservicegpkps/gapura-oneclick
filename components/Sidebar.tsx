@@ -322,12 +322,12 @@ export default function Sidebar({ role, division }: { role: string; division?: s
     const isOcsOrOs = role === 'DIVISI_OCS' || role === 'PARTNER_OCS' || role === 'DIVISI_OS' || role === 'PARTNER_OS';
 
     // ponytail: OCS/OS users keep their Schedule/calendar links only off Operational
-    // Monitoring (/dashboard/op) and off the shared create-report page when it was
+    // Monitoring (/dashboard/operasional) and off the shared create-report page when it was
     // opened in ground-handling mode (not ?type=joumpa) — otherwise navigating there
     // from Operational Monitoring would snap the sidebar back to Customer Service.
     // Calendar stays visible on their own All Reports list — it's a real nav item,
     // not something tied to the ground-handling report view.
-    const isOnOperationalMonitoring = isOcsOrOs && pathname.startsWith('/dashboard/op');
+    const isOnOperationalMonitoring = isOcsOrOs && pathname.startsWith('/dashboard/operasional');
     const isOnOperationalCreateReport = isOcsOrOs
         && pathname === '/dashboard/employee/new' && searchParams.get('type') !== 'joumpa';
     const isOperationalContext = isOnOperationalMonitoring || isOnOperationalCreateReport;
@@ -340,15 +340,15 @@ export default function Sidebar({ role, division }: { role: string; division?: s
         // The nav config is fixed per role, so "Dashboard"/"All Reports" always
         // point at the user's own division. While actually browsing Operational
         // Monitoring (or filing a ground-handling report from it), repoint those
-        // two links at /dashboard/op so they don't yank the user back to their
+        // two links at /dashboard/operasional so they don't yank the user back to their
         // own Customer Service dashboard mid-browse.
         if (!isOperationalContext) return withoutSchedule;
         return withoutSchedule.map((group) => group.title !== 'Monitoring' ? group : {
             ...group,
             items: group.items.map((item) => ({
                 ...item,
-                href: item.label === 'Dashboard' ? '/dashboard/op'
-                    : item.label === 'All Reports' ? '/dashboard/op/reports'
+                href: item.label === 'Dashboard' ? '/dashboard/operasional'
+                    : item.label === 'All Reports' ? '/dashboard/operasional/reports'
                     : item.href,
             })),
         });
@@ -363,7 +363,7 @@ export default function Sidebar({ role, division }: { role: string; division?: s
     const confirmLogout = useCallback(() => {
         setLogoutConfirmOpen(false);
         setLoading(true);
-        performOptimisticLogout();
+        void performOptimisticLogout();
     }, []);
 
     const handleReturnToOrigin = useCallback(async () => {

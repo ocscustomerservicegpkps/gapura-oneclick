@@ -11,6 +11,13 @@ const nextConfig = {
     reactCompiler: true,
 
     experimental: {
+        // `proxy.ts` matches `/api/:path*`, so Next buffers every API request
+        // body to make it readable twice — capped at 10MB by default. Evidence
+        // uploads now carry video and documents up to the 25MB storage-bucket
+        // limit, and anything over the cap arrives truncated and fails with
+        // "Failed to parse body as FormData". Headroom covers multipart overhead.
+        proxyClientMaxBodySize: '32mb',
+
         optimizePackageImports: [
             'lucide-react',
             'recharts',

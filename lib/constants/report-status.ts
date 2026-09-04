@@ -148,9 +148,18 @@ export function getSeverityConfig(level: unknown) {
     return SEVERITY_CONFIG[normalized as SeverityLevel] || SEVERITY_CONFIG.LOW;
 }
 
+/**
+ * Both inputs cross a type boundary at every call site (sheet rows, request
+ * bodies), so neither is guaranteed to match its declared type at runtime. An
+ * unrecognised priority threw on the property access, and an unparseable date
+ * produced an Invalid Date whose deadline compared false against everything —
+ * silently marking the report as never overdue. Both now fall back the way
+ * getSeverityConfig does.
+ */
 export function calculateSlaDeadline(createdAt: Date | string, priority: ReportPriority): Date {
-    const created = typeof createdAt === 'string' ? new Date(createdAt) : createdAt;
-    const slaHours = PRIORITY_CONFIG[priority].slaHours;
+    const parsed = typeof createdAt === 'string' ? new Date(createdAt) : createdAt;
+    const created = parsed instanceof Date && !Number.isNaN(parsed.getTime()) ? parsed : new Date();
+    const slaHours = (PRIORITY_CONFIG[priority] ?? PRIORITY_CONFIG.medium).slaHours;
     return new Date(created.getTime() + slaHours * 60 * 60 * 1000);
 }
 

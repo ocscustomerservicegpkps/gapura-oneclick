@@ -30,6 +30,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 
+# Evidence video is re-encoded on upload (lib/video-compression.ts). Without the
+# binary the app still works — it just stores what the handset produced, which
+# is several times larger. Not needed in the builder stage.
+RUN apk add --no-cache ffmpeg
+
 COPY package.json package-lock.json ./
 
 RUN --mount=type=cache,target=/root/.npm \

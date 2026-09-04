@@ -137,8 +137,8 @@ const LINKS_CONFIG: Record<string, NavGroupConfig[]> = {
         {
             title: 'Operational Dashboard',
             items: [
-                { href: '/dashboard/op', label: 'Dashboard', icon: LayoutDashboard },
-                { href: '/dashboard/op/reports', label: 'All Reports', icon: ClipboardList },
+                { href: '/dashboard/operasional', label: 'Dashboard', icon: LayoutDashboard },
+                { href: '/dashboard/operasional/reports', label: 'All Reports', icon: ClipboardList },
             ]
         }
     ],
@@ -236,7 +236,11 @@ export const resolveNavGroups = (role: string, division?: string | null): NavGro
 const GET_LINKS_KEY = (role: string): string => {
     const r = (role || '').toUpperCase();
 
-    if (r.includes('SUPER') || r === 'ADMIN') return 'SUPER_ADMIN';
+    // Checked before the SUPER branch: mapping ADMIN to SUPER_ADMIN handed it
+    // the full Super Admin menu and left the restricted 'ADMIN' group above
+    // unreachable, which is the opposite of what defining it separately means.
+    if (r === 'ADMIN') return 'ADMIN';
+    if (r.includes('SUPER')) return 'SUPER_ADMIN';
     if (r === 'ANALYST') return 'ANALYST';
     if (r === 'MANAGER_CABANG') return 'MANAGER';
     if (r === 'STAFF_CABANG') return 'STAFF_CABANG';

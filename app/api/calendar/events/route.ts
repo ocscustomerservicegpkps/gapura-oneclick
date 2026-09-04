@@ -60,9 +60,15 @@ export async function GET(request: Request) {
     }
 
     if (start_date && end_date) {
+      // One `or` group, because PostgREST ANDs repeated `or=` parameters. The
+      // second one here had no `is.null` branch, so it ANDed away every
+      // single-day event (those carry a null end date), and the extra
+      // `event_date >= start_date` dropped multi-day events already running
+      // when the range began. With the `lte` above this is the overlap test.
       query = query.lte('event_date', end_date);
-      query = query.or(`event_end_date.gte.${start_date},event_end_date.is.null`);
-      query = query.gte('event_date', start_date).or(`event_end_date.gte.${start_date}`);
+      query = query.or(
+        `event_end_date.gte.${start_date},and(event_end_date.is.null,event_date.gte.${start_date})`
+      );
     } else if (start_date) {
       query = query.or(`event_date.gte.${start_date},event_end_date.gte.${start_date}`);
     } else if (end_date) {

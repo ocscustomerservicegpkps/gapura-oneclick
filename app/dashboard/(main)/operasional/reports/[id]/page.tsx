@@ -8,7 +8,7 @@ export default function OPReportDetailPage() {
     return (
         <AppleReportPage
             reportId={params.id as string}
-            backTo="/dashboard/op/reports"
+            backTo="/dashboard/operasional/reports"
             divisionColor="#06b6d4"
         />
     );

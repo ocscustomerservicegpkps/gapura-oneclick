@@ -231,7 +231,9 @@ export function processQuery(query: QueryDefinition, data: any[]): QueryResult {
   } 
 
   else {
-      resultRows = filtered;
+      // Copied, because this branch assigns the caller's own array: sorting it
+      // in place below reordered the data the caller passed in.
+      resultRows = [...filtered];
   }
 
   if (query.sorts && query.sorts.length > 0) {

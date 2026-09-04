@@ -1,6 +1,7 @@
 'use client';
 
 import { Report } from '@/types';
+import { buildEvidenceLinkHtml } from '@/lib/charts/evidence-link-html';
 
 export interface BranchOverview {
   branch: string;
@@ -409,19 +410,7 @@ export async function fetchAllBranchIntelReports(filters: BaseFilters = {}): Pro
 
   return filtered.map(report => {
     const evidenceUrls = report.evidence_url || report.evidence_urls;
-    let evidenceLink = '-';
-    if (evidenceUrls) {
-      if (Array.isArray(evidenceUrls)) {
-        evidenceLink = evidenceUrls.slice(0, 3).map((url, i) =>
-          `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">Link ${i + 1}</a>`
-        ).join(' ');
-        if (evidenceUrls.length > 3) {
-          evidenceLink += ` +${evidenceUrls.length - 3} more`;
-        }
-      } else if (typeof evidenceUrls === 'string' && evidenceUrls.startsWith('http')) {
-        evidenceLink = `<a href="${evidenceUrls}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">Link</a>`;
-      }
-    }
+    const evidenceLink = buildEvidenceLinkHtml(evidenceUrls);
 
     return {
       Date: (report.date_of_event || report.created_at) ? new Date(report.date_of_event || report.created_at || '').toLocaleDateString('id-ID') : '-',

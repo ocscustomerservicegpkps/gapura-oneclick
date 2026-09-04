@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
 import { verifySession } from '@/lib/auth-utils';
+import { getSecurityRouteToken } from '@/lib/security/route-auth';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { logSecurityAudit } from '@/lib/security/audit-logger';
 
 export async function POST(request: Request) {
-    const authHeader = request.headers.get('Authorization');
-    const token = authHeader?.split(' ')[1] || request.headers.get('cookie')?.split('session=')[1]?.split(';')[0];
+    const token = await getSecurityRouteToken(request);
 
     if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -29,22 +29,34 @@ export async function POST(request: Request) {
         const targetStatus = statusMap[action];
         if (!targetStatus) return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
 
-        const { error } = await supabaseAdmin
+        // `.select()` so a non-existent alertId is a 404 rather than a silent
+        // success: an update matching no rows returns no error, so the caller
+        // was told the alert had been acknowledged and the audit log recorded
+        // that it had.
+        const { data: updated, error } = await supabaseAdmin
             .from('security_alerts')
-            .update({ 
+            .update({
                 status: targetStatus,
                 updated_at: new Date().toISOString()
             })
-            .eq('id', alertId);
+            .eq('id', alertId)
+            .select('id')
+            .maybeSingle();
 
         if (error) throw error;
+        if (!updated) {
+            return NextResponse.json({ error: 'Alert not found' }, { status: 404 });
+        }
 
         await logSecurityAudit({
             actorId: session.id,
             action: `ALERT_${action}`,
             entityType: 'SECURITY_ALERT',
             entityId: alertId,
-            newValue: { status: 'SUCCESS' }
+            // The status the alert was actually moved to. 'SUCCESS' is not a
+            // status any alert can hold, so the audit trail recorded nothing
+            // about what changed.
+            newValue: { status: targetStatus }
         });
 
         return NextResponse.json({ success: true, status: targetStatus });

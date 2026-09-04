@@ -20,7 +20,10 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const view = searchParams.get('view');
-    const refresh = searchParams.get('refresh') === 'true';
+    // Anonymous callers cannot force a cache bypass: `refresh=true` re-reads the
+    // whole corpus, and this endpoint answers the public embed dashboards, so
+    // honouring it meant anyone with the URL could trigger that work per request.
+    const refresh = searchParams.get('refresh') === 'true' && Boolean(session);
 
     if (!view) {
       return NextResponse.json({ error: 'Missing "view" parameter' }, { status: 400 });
@@ -92,17 +95,20 @@ export async function GET(request: NextRequest) {
             // max-age lets the user's browser reuse pre-aggregated views instantly on
             // re-navigation without a fresh round-trip.
             'Cache-Control': 'private, max-age=30, stale-while-revalidate=120',
+            // The body depends on the session cookie (RBAC filtering); without
+            // Vary a cache keyed on URL alone could serve one caller's view to
+            // another.
+            'Vary': 'Cookie',
           }
         : {
             'Cache-Control': 'public, s-maxage=180, stale-while-revalidate=300',
+            'Vary': 'Cookie',
           }
     });
 
   } catch (err) {
     console.error('Aggregated Analytics API error:', err);
-    return NextResponse.json({ 
-      error: 'Failed to aggregate reports',
-      details: err instanceof Error ? err.message : 'Unknown error'
-    }, { status: 500 });
+    // Detail stays server-side: this endpoint answers anonymous callers.
+    return NextResponse.json({ error: 'Failed to aggregate reports' }, { status: 500 });
   }
 }

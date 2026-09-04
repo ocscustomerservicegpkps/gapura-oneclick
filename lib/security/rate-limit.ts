@@ -3,12 +3,22 @@ import { createHmac, timingSafeEqual } from 'crypto';
 
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 
-setInterval(() => {
+/**
+ * Sweeping expired entries is housekeeping, not work worth keeping the process
+ * alive for — unref'd so importing this module never blocks a script or test
+ * runner from exiting.
+ */
+function sweepEvery(ms: number, sweep: () => void) {
+    const timer = setInterval(sweep, ms);
+    timer.unref?.();
+}
+
+sweepEvery(60_000, () => {
     const now = Date.now();
     for (const [key, entry] of rateLimitMap) {
         if (now > entry.resetTime) rateLimitMap.delete(key);
     }
-}, 60_000);
+});
 
 interface RateLimitResult {
     success: boolean;
@@ -36,6 +46,62 @@ export function checkRateLimit(
     }
 
     return { success: true, remaining: limit - entry.count, resetAt: entry.resetTime };
+}
+
+const byteBudgetMap = new Map<string, { bytes: number; resetTime: number }>();
+
+sweepEvery(60_000, () => {
+    const now = Date.now();
+    for (const [key, entry] of byteBudgetMap) {
+        if (now > entry.resetTime) byteBudgetMap.delete(key);
+    }
+});
+
+export interface ByteBudgetResult {
+    success: boolean;
+    remainingBytes: number;
+    resetAt: number;
+}
+
+/**
+ * Volume limit rather than a request-count limit. Counting requests alone is
+ * the wrong control once a single request may carry tens of megabytes: five
+ * uploads a minute is trivial for photos and a firehose for video. This caps
+ * what one client can push through a window regardless of how it is split up.
+ *
+ * In-memory, so it is per-instance and resets on deploy — it is a throttle on
+ * casual abuse, not an accounting system. Pair it with a count limit on the
+ * durable store (`checkDbRateLimit`) for anything that must hold across
+ * instances.
+ */
+export function checkByteBudget(
+    key: string,
+    bytes: number,
+    budgetBytes: number,
+    windowMs: number,
+): ByteBudgetResult {
+    const now = Date.now();
+    const requested = Math.max(0, Math.floor(bytes));
+    const entry = byteBudgetMap.get(key);
+
+    if (!entry || now > entry.resetTime) {
+        const resetTime = now + windowMs;
+        // A single request larger than the whole budget is still refused, and
+        // recording it keeps a retry loop from resetting the window each time.
+        byteBudgetMap.set(key, { bytes: requested, resetTime });
+        return {
+            success: requested <= budgetBytes,
+            remainingBytes: Math.max(0, budgetBytes - requested),
+            resetAt: resetTime,
+        };
+    }
+
+    entry.bytes += requested;
+    return {
+        success: entry.bytes <= budgetBytes,
+        remainingBytes: Math.max(0, budgetBytes - entry.bytes),
+        resetAt: entry.resetTime,
+    };
 }
 
 const RATE_LIMIT_RPC_TIMEOUT_MS = 3_000;
@@ -105,12 +171,26 @@ export function timingSafeStringEqual(provided: string | null | undefined, expec
     return providedBuf.length === expectedBuf.length && timingSafeEqual(providedBuf, expectedBuf);
 }
 
+/**
+ * The *first* X-Forwarded-For entry is whatever the client sent — a proxy
+ * appends to the chain, it does not clear it. Reading it meant anyone could
+ * rotate the key on every IP-based limit (login, the qa-verify brute-force
+ * gate, uploads, the 5/hr public report cap) by varying one header.
+ *
+ * x-real-ip is written by the reverse proxy itself. Failing that, the *last*
+ * XFF entry is the one the nearest proxy appended, which a client cannot forge
+ * past. With no proxy at all neither header means anything, but then the
+ * attacker is already talking straight to the origin.
+ *
+ * ponytail: no trusted-proxy CIDR list — add one if you ever run more than one
+ * hop you don't control.
+ */
 export function getClientIpFromRequest(request: Request): string {
-    return (
-        request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-        request.headers.get('x-real-ip') ||
-        'unknown'
-    );
+    const realIp = request.headers.get('x-real-ip')?.trim();
+    if (realIp) return realIp;
+
+    const chain = request.headers.get('x-forwarded-for')?.split(',') ?? [];
+    return chain[chain.length - 1]?.trim() || 'unknown';
 }
 
 export function verifyUploadToken(token: string, maxAgeMs: number = 5 * 60 * 1000): boolean {

@@ -10,6 +10,7 @@ import { AdminSection } from '@/components/quick-access/admin/AdminSection';
 import { TileEditorModal } from '@/components/quick-access/admin/TileEditorModal';
 import { SectionEditorModal } from '@/components/quick-access/admin/SectionEditorModal';
 import { SubmissionsModal } from '@/components/quick-access/admin/SubmissionsModal';
+import { QuickLinksPanel } from '@/components/quick-access/admin/QuickLinksPanel';
 import type { QASpan, QuickAccessAdminConfigDTO, QuickAccessAdminTile, QuickAccessSectionDTO } from '@/lib/quick-access';
 
 interface ConfirmState {
@@ -311,6 +312,8 @@ export default function AdminQuickAccessPage() {
                         </button>
                     </div>
                     )}
+
+                    {config && config.sections.length > 0 && <QuickLinksPanel sections={config.sections} />}
                 </div>
             </main>
 

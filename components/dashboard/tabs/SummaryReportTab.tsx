@@ -679,9 +679,16 @@ function TrendBadge({
   return <span className={pillClass}><span aria-hidden="true">{arrow}</span>{deltaPct}%</span>;
 }
 
+/**
+ * Months past `totalsThroughMonth` still render as rows but are left out of the
+ * totals. The year-over-year deltas compared a complete previous year against a
+ * partial current one — eight months of 2026 against twelve of 2025 read as a
+ * 33% drop before a single thing had changed.
+ */
 function buildYearlyMonthRows(
   reports: Report[],
-  year: number
+  year: number,
+  totalsThroughMonth = 11
 ) {
   const monthRows: YearlyCategoryMonthRow[] = Array.from({ length: 12 }, (_, monthIndex) => {
     const monthLabel = new Date(year, monthIndex, 1).toLocaleString('en-US', { month: 'short' }).toUpperCase();
@@ -711,7 +718,7 @@ function buildYearlyMonthRows(
     };
   });
 
-  const totals = monthRows.reduce(
+  const totals = monthRows.filter((row) => row.monthIndex <= totalsThroughMonth).reduce(
     (acc, row) => ({
       irregularity: acc.irregularity + row.irregularity,
       complaint: acc.complaint + row.complaint,
@@ -874,14 +881,22 @@ export function SummaryReportTab({ reports: rawReports, selectedYear }: SummaryR
     [currentYearReports, currentYearMonthColumns]
   );
 
+  // Both years are totalled through the same month. If the current year is
+  // still running, comparing its elapsed months against all twelve of the
+  // previous year is not a comparison, it is a calendar artefact.
+  const comparisonMonthCap = useMemo(() => {
+    const now = new Date();
+    return comparisonCurrentYear === now.getFullYear() ? now.getMonth() : 11;
+  }, [comparisonCurrentYear]);
+
   const previousYearSummary = useMemo(
-    () => (previousYear !== null ? buildYearlyMonthRows(filteredSummaryReports, previousYear) : null),
-    [filteredSummaryReports, previousYear]
+    () => (previousYear !== null ? buildYearlyMonthRows(filteredSummaryReports, previousYear, comparisonMonthCap) : null),
+    [filteredSummaryReports, previousYear, comparisonMonthCap]
   );
 
   const currentYearSummary = useMemo(
-    () => (comparisonCurrentYear !== null ? buildYearlyMonthRows(filteredSummaryReports, comparisonCurrentYear) : null),
-    [filteredSummaryReports, comparisonCurrentYear]
+    () => (comparisonCurrentYear !== null ? buildYearlyMonthRows(filteredSummaryReports, comparisonCurrentYear, comparisonMonthCap) : null),
+    [filteredSummaryReports, comparisonCurrentYear, comparisonMonthCap]
   );
 
   const yearComparisonRows = useMemo(
@@ -973,8 +988,8 @@ export function SummaryReportTab({ reports: rawReports, selectedYear }: SummaryR
       <section>
         {hasComparableSummaryYears && previousYear !== null && comparisonCurrentYear !== null ? (
           <SourceCard reports={filteredSummaryReports}>{({ filtered, toggle: sourceToggle }) => {
-            const previous = buildYearlyMonthRows(filtered, previousYear);
-            const current = buildYearlyMonthRows(filtered, comparisonCurrentYear);
+            const previous = buildYearlyMonthRows(filtered, previousYear, comparisonMonthCap);
+            const current = buildYearlyMonthRows(filtered, comparisonCurrentYear, comparisonMonthCap);
             const comparison = buildYearComparisonRows(previous.totals, current.totals);
             const onMonthClick = (targetYear: number, monthIndex: number, metricId: SummaryMetricId) => {
               const drilldownReports = filtered.filter((report) => {

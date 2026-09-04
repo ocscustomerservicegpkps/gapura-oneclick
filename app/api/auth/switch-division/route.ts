@@ -98,6 +98,11 @@ function getDivisionRedirectPath(divisionCode: string) {
         return '/dashboard/hc';
     }
 
+    // OP's dashboard lives at /dashboard/operasional; /dashboard/op is a 404.
+    if (divisionCode === 'OP') {
+        return '/dashboard/operasional';
+    }
+
     return `/dashboard/${divisionCode.toLowerCase()}`;
 }
 

@@ -143,13 +143,56 @@ function getNextJakartaMidnight(now: Date): Date {
     return new Date(nextMidnightAsUtc - JAKARTA_OFFSET_MS);
 }
 
+function buildQuotaKey(userId: string, now: Date): string {
+    return `va-chat:${userId}:${getJakartaDateKey(now)}`;
+}
+
+/**
+ * Reads the daily counter without touching it.
+ *
+ * The chat proxy used to consume a slot before it knew whether the RAG
+ * backend would answer, so every failed attempt — a rejected proxy secret, an
+ * upstream outage — still cost the user one of their five daily messages and
+ * the counter dropped to 0 without a single answer. Callers now check here
+ * first and only consume once a response is actually on its way.
+ */
+export async function peekVirtualAssistantQuota(
+    userId: string,
+    now: Date = new Date(),
+): Promise<VirtualAssistantQuota> {
+    const limit = getVirtualAssistantDailyLimit();
+    const resetAt = getNextJakartaMidnight(now);
+
+    const { data, error } = await supabaseAdmin
+        .from('rate_limits')
+        .select('count, reset_at')
+        .eq('key', buildQuotaKey(userId, now))
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(error.message);
+    }
+
+    // A window that has already elapsed counts as empty: consume_rate_limit
+    // resets such a row on its next write.
+    const expired = !data?.reset_at || new Date(data.reset_at).getTime() <= now.getTime();
+    const currentCount = expired ? 0 : Number(data?.count ?? 0);
+
+    return {
+        allowed: currentCount < limit,
+        remaining: Math.max(limit - currentCount, 0),
+        resetAt: expired ? resetAt : new Date(data!.reset_at),
+        currentCount,
+    };
+}
+
 export async function consumeVirtualAssistantQuota(
     userId: string,
     now: Date = new Date(),
 ): Promise<VirtualAssistantQuota> {
     const limit = getVirtualAssistantDailyLimit();
     const resetAt = getNextJakartaMidnight(now);
-    const key = `va-chat:${userId}:${getJakartaDateKey(now)}`;
+    const key = buildQuotaKey(userId, now);
 
     const { data, error } = await supabaseAdmin.rpc('consume_rate_limit', {
         p_key: key,

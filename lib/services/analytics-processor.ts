@@ -8,7 +8,7 @@ import {
   resolveReportHub,
   resolveRootCause,
 } from '@/lib/report-normalization';
-import { toLocalYMD } from '@/lib/utils/wib-date';
+import { toLocalYMD, wibYearMonth } from '@/lib/utils/wib-date';
 
 type LowerCategoryCounts = {
   irregularity: number;
@@ -68,16 +68,23 @@ export class AnalyticsProcessor {
   private static getMonthKey(dateStr: string | undefined): string {
     if (!dateStr) return '';
     try {
-      let date: Date;
+      // A bare YYYY-MM-DD is already a WIB calendar date — take its month
+      // directly rather than routing it through a Date, which would re-read it
+      // in the process timezone.
       if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-          const [y, m, day] = dateStr.split('-').map(Number);
-          date = new Date(y, m - 1, day);
-      } else {
-          date = new Date(dateStr);
+        return dateStr.slice(0, 7);
       }
 
+      const date = new Date(dateStr);
       if (isNaN(date.getTime())) return '';
-      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+      // An ISO instant has to be bucketed in WIB, the same way the daily map
+      // does it (toLocalYMD). Using getFullYear()/getMonth() put 17:00–24:00Z —
+      // 00:00–07:00 WIB, i.e. the early hours of the *next* day — in the
+      // previous month whenever the process ran in UTC, so the monthly and
+      // daily views disagreed about the same rows.
+      const { year, month } = wibYearMonth(date);
+      return `${year}-${String(month + 1).padStart(2, '0')}`;
     } catch {
       return '';
     }
@@ -470,10 +477,13 @@ export class AnalyticsProcessor {
   public static processHubReport(reports: Report[]) {
     const hubMap = new Map<string, LowerCategoryCounts & { total: number }>();
 
-    const now = new Date();
-    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const lastMonthKey = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, '0')}`;
+    // Same WIB bucketing as getMonthKey: these are compared against its output,
+    // so deriving them from process-local getters made the month-over-month KPI
+    // read the wrong bucket whenever the process timezone was not WIB.
+    const { year: nowYear, month: nowMonth } = wibYearMonth(new Date());
+    const currentMonthKey = `${nowYear}-${String(nowMonth + 1).padStart(2, '0')}`;
+    const lastMonthDate = new Date(Date.UTC(nowYear, nowMonth - 1, 1));
+    const lastMonthKey = `${lastMonthDate.getUTCFullYear()}-${String(lastMonthDate.getUTCMonth() + 1).padStart(2, '0')}`;
     let currentMonthCount = 0;
     let lastMonthCount = 0;
 
@@ -560,10 +570,13 @@ export class AnalyticsProcessor {
   public static processBranchReport(reports: Report[]) {
     const branchMap = new Map<string, LowerCategoryCounts & { total: number }>();
 
-    const now = new Date();
-    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const lastMonthKey = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, '0')}`;
+    // Same WIB bucketing as getMonthKey: these are compared against its output,
+    // so deriving them from process-local getters made the month-over-month KPI
+    // read the wrong bucket whenever the process timezone was not WIB.
+    const { year: nowYear, month: nowMonth } = wibYearMonth(new Date());
+    const currentMonthKey = `${nowYear}-${String(nowMonth + 1).padStart(2, '0')}`;
+    const lastMonthDate = new Date(Date.UTC(nowYear, nowMonth - 1, 1));
+    const lastMonthKey = `${lastMonthDate.getUTCFullYear()}-${String(lastMonthDate.getUTCMonth() + 1).padStart(2, '0')}`;
     let currentMonthCount = 0;
     let lastMonthCount = 0;
 

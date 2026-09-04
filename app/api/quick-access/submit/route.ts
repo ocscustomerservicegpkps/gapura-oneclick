@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase-admin';
-import { checkRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
+import { checkDbRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
 
 const MAX_DATA_BYTES = 16_000;
 const MAX_VALUE_LENGTH = 2000;
@@ -14,7 +14,7 @@ const MAX_VALUE_LENGTH = 2000;
 export async function POST(request: Request) {
     try {
         const clientIp = getClientIpFromRequest(request);
-        const rateLimit = checkRateLimit(`qa-submit:${clientIp}`, 10, 60_000);
+        const rateLimit = await checkDbRateLimit(`qa-submit:${clientIp}`, 10, 60_000);
         if (!rateLimit.success) {
             return NextResponse.json({ error: 'Terlalu banyak pengiriman. Coba lagi dalam 1 menit.' }, { status: 429 });
         }

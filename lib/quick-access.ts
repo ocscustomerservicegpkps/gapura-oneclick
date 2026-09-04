@@ -152,6 +152,16 @@ export function getQAIcon(name: string | undefined | null): LucideIcon {
     return QUICK_ACCESS_ICON_MAP[name || ''] || LinkIcon;
 }
 
+/**
+ * Slugifies a tile title for the `?open=` quick-link param on
+ * /auth/public-report. Kept in sync with PublicQuickAccessBoard's matcher —
+ * changing the tile title changes its slug, so prefer `?open=<tile.id>`
+ * for links that must stay valid across title edits.
+ */
+export function slugifyTileTitle(title: string): string {
+    return title.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
 // ── Spans → Tailwind classes ─────────────────────────────────────────────
 // Matches the public grid: grid-cols-1 sm:grid-cols-2 lg:grid-cols-4.
 // Mobile: full width (grid-cols-1); sm (2 cols): col-span-2 = full row;

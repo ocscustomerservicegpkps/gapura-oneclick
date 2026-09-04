@@ -1,9 +1,11 @@
 
+import 'server-only';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { reportsService } from '@/lib/services/reports-service';
 import { notifyNewRecordEmail } from '@/lib/notifications';
 import { buildReportFingerprint } from '@/lib/report-fingerprint';
-import { buildReportsSyncRow, persistReportMetadata } from '@/lib/report-persistence';
+import { buildReportsSyncRow, buildRowContentHash, persistReportMetadata } from '@/lib/report-persistence';
+import { shouldKeepLocalEdit } from '@/lib/report-sync-guard';
 import type { Report } from '@/types';
 import { acquireSyncLock, bumpSyncVersion, completeSyncState, getSyncState } from '@/lib/sync-state';
 
@@ -17,6 +19,19 @@ interface SyncResult {
   duration: number;
   error?: string;
   joined?: boolean;
+  skipped?: boolean;
+}
+
+interface SyncOptions {
+  /**
+   * Skip the run entirely when the last successful sync is younger than this.
+   * The DB lock in performSyncReportsFromSheets only prevents *overlapping*
+   * runs — it frees the moment a sync finishes, so a burst of logins would
+   * otherwise pull the whole Google Sheets corpus once per login and burn
+   * through the API quota. Callers that must always run (cron, manual admin
+   * sync, unscoped webhook ping) leave this unset.
+   */
+  minIntervalMs?: number;
 }
 
 interface UpsertBatchResult {
@@ -24,6 +39,7 @@ interface UpsertBatchResult {
   updated: number;
   errors: number;
   insertedReports: Report[];
+  unchanged: number;
 }
 
 interface SyncWorkItem {
@@ -46,6 +62,9 @@ interface ExistingSyncRecord {
   sheet_id: string;
   source_fingerprint: string | null;
   source_sheet?: string | null;
+  content_hash?: string | null;
+  updated_at?: string | null;
+  synced_at?: string | null;
 }
 
 interface SyncStatus {
@@ -60,7 +79,39 @@ export class SyncService {
   private static PAGE_SIZE = 1000;
   private static activeSyncPromise: Promise<SyncResult> | null = null;
 
-  static async syncReportsFromSheets(triggerSource = 'direct'): Promise<SyncResult> {
+  private static emptyResult(startTime: number, extra: Partial<SyncResult> = {}): SyncResult {
+    return {
+      success: true,
+      totalProcessed: 0,
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      errors: 0,
+      duration: Date.now() - startTime,
+      ...extra,
+    };
+  }
+
+  static async syncReportsFromSheets(
+    triggerSource = 'direct',
+    options: SyncOptions = {}
+  ): Promise<SyncResult> {
+    const { minIntervalMs } = options;
+    if (minIntervalMs && minIntervalMs > 0) {
+      const startTime = Date.now();
+      try {
+        const state = await getSyncState('reports');
+        const lastSyncAt = state.last_sync_at ? Date.parse(state.last_sync_at) : NaN;
+        if (Number.isFinite(lastSyncAt) && Date.now() - lastSyncAt < minIntervalMs) {
+          return this.emptyResult(startTime, { skipped: true });
+        }
+      } catch (stateError) {
+        // Cannot tell how fresh the corpus is — fall through and sync rather
+        // than silently skipping reconciliation.
+        console.warn(`[SyncService] Cooldown check failed for ${triggerSource}, syncing anyway:`, stateError);
+      }
+    }
+
     if (this.activeSyncPromise) {
       const result = await this.activeSyncPromise;
       return {
@@ -103,12 +154,22 @@ export class SyncService {
       const { data: existing } = sheetId
         ? await supabaseAdmin
             .from('ground_handling_irregularity_report')
-            .select('id')
+            .select('id, updated_at, synced_at')
             .eq('sheet_id', sheetId)
             .maybeSingle()
         : { data: null };
 
-      await persistReportMetadata(report);
+      // Same guard the full sync's pull uses: a locally-dirty row carries an
+      // app edit the sheet has not confirmed yet, so only a genuinely newer
+      // sheet edit may overwrite it.
+      if (existing && shouldKeepLocalEdit(existing, report.updated_at)) {
+        return { success: true, changed: false };
+      }
+
+      // Content was just fetched from the sheet — it is sheet-confirmed, so
+      // stamp synced_at; otherwise the outbox would push it back (a no-op
+      // sheet write) on every full sync.
+      await persistReportMetadata(report, { markSynced: true });
       reportsService.invalidateCache();
 
       // The full sync bumps sync_version via completeSyncState({ bumpVersion: true }),
@@ -148,18 +209,21 @@ export class SyncService {
       const lock = await acquireSyncLock('reports', 300);
       lockAcquired = lock.acquired;
       if (!lockAcquired) {
-        return {
-          success: true,
-          totalProcessed: 0,
-          inserted: 0,
-          updated: 0,
-          deleted: 0,
-          errors: 0,
-          duration: Date.now() - startTime,
-          joined: true,
-        };
+        return this.emptyResult(startTime, { joined: true });
       }
 
+
+      // Local (app-side) edits must reach the sheet BEFORE the pull reads it:
+      // the pull treats any row whose content differs from the sheet as
+      // "sheet changed" and overwrites the DB row — which would silently
+      // revert an app edit whose sheet write never landed (e.g. the PATCH
+      // evidence fallback). Draining the outbox first means the pull reads
+      // the app's own values back and sees "unchanged".
+      try {
+        await this.pushLocalUpdatesToSheets();
+      } catch (recErr) {
+        console.warn('[SyncService] Outbox drain failed:', recErr);
+      }
 
       const reports = await reportsService.fetchSheetsReports();
 
@@ -201,18 +265,8 @@ export class SyncService {
 
       try {
         deleted = await this.deleteMissingFromSync(reports);
-        if (deleted > 0) {
-        }
       } catch (delErr) {
         console.warn('[SyncService] Delete-missing step failed:', delErr);
-      }
-
-      try {
-        const pushed = await this.pushLocalUpdatesToSheets();
-        if (pushed > 0) {
-        }
-      } catch (recErr) {
-        console.warn('[SyncService] Reconciliation step failed:', recErr);
       }
 
       try {
@@ -222,11 +276,14 @@ export class SyncService {
       }
 
       const duration = Date.now() - startTime;
+      // sync_version is the validator behind the /api/dashboard/reports ETag and
+      // the dashboard_cache_entries snapshots. A sync that changed nothing must
+      // not bump it, or every reconciliation run needlessly invalidates both.
       await completeSyncState({
         source: 'reports',
         success: true,
         rowCount: reports.length,
-        bumpVersion: true,
+        bumpVersion: inserted + updated + deleted > 0,
       });
       // Batched rather than unbounded so a large sync batch doesn't fire
       // every new-record email concurrently against the email provider.
@@ -320,7 +377,7 @@ export class SyncService {
     while (hasMore) {
       const baseQuery = supabaseAdmin
         .from('ground_handling_irregularity_report')
-        .select('id, sheet_id, source_fingerprint, source_sheet')
+        .select('id, sheet_id, source_fingerprint, source_sheet, content_hash, updated_at, synced_at')
         .order('sheet_id', { ascending: true })
         .range(offset, offset + this.PAGE_SIZE - 1);
 
@@ -371,14 +428,32 @@ export class SyncService {
 
     const upsertItems: SyncWorkItem[] = [];
     const relinkItems: RelinkWorkItem[] = [];
+    let unchanged = 0;
 
     for (const report of reports) {
-      const row = buildReportsSyncRow(report);
+      const row = buildReportsSyncRow(report, { markSynced: true });
+      row.content_hash = buildRowContentHash(row);
       const sheetId = String(row.sheet_id);
       const fingerprint = String(row.source_fingerprint || '');
       const exactMatch = existingBySheetId.get(sheetId);
 
       if (exactMatch) {
+        // Nothing this sync would write differs from what is stored — skip the
+        // UPDATE entirely. Without this the sync rewrote every row on every run,
+        // which meant `updated` was always non-zero, which meant sync_version
+        // bumped every time and invalidated the dashboard caches for nothing.
+        if (exactMatch.content_hash && exactMatch.content_hash === row.content_hash) {
+          unchanged++;
+          continue;
+        }
+        // Locally-dirty rows carry an app edit the sheet hasn't confirmed yet.
+        // The outbox drains them to the sheet earlier in the same sync run, so
+        // the pull must not overwrite them with stale sheet values here —
+        // only a genuinely newer sheet edit wins (see shouldKeepLocalEdit).
+        if (shouldKeepLocalEdit(exactMatch, report.updated_at)) {
+          unchanged++;
+          continue;
+        }
         upsertItems.push({ kind: 'update', report, row });
         continue;
       }
@@ -417,29 +492,50 @@ export class SyncService {
     let errors = 0;
     const insertedReports: Report[] = [];
 
-    for (const item of relinkItems) {
+    // Children move first, for the whole shift at once. Each item.row carries
+    // the new uuidv5(sheet_id) as its id, so the UPDATE below changes the
+    // report's primary key, and every comment, notification, document and
+    // evidence file keyed on the old id would be left pointing at an id this
+    // report no longer has — one the next report to occupy that sheet row
+    // inherits. It has to be one batched call rather than one per report: a
+    // single sheet insert shifts a run of rows into a chain of mappings, and
+    // moving them one at a time sweeps each report's children along into the
+    // next report's id (see relink_report_children_batch).
+    //
+    // Moving first also means a failure here leaves every report row untouched,
+    // so the next sync retries the same relinks rather than committing key
+    // changes whose children can no longer be found.
+    let childrenRelinked = relinkItems.length === 0;
+    if (relinkItems.length > 0) {
       try {
-        const { error } = await supabaseAdmin
-          .from('ground_handling_irregularity_report')
-          .update(item.row)
-          .eq('id', item.existingId);
-
-        if (error) {
-          throw error;
-        }
-
-        await this.relinkReportCommentReferences(
-          item.previousSheetId,
-          String(item.row.sheet_id)
-        );
-
-        updated++;
+        await this.relinkReportChildren(relinkItems);
+        childrenRelinked = true;
       } catch (error) {
-        console.warn(
-          `[SyncService] Failed to relink ${item.previousSheetId} -> ${item.row.sheet_id}:`,
-          error
-        );
-        errors++;
+        console.warn('[SyncService] Relink of child rows failed, skipping all relinks:', error);
+        errors += relinkItems.length;
+      }
+    }
+
+    if (childrenRelinked) {
+      for (const item of relinkItems) {
+        try {
+          const { error } = await supabaseAdmin
+            .from('ground_handling_irregularity_report')
+            .update(item.row)
+            .eq('id', item.existingId);
+
+          if (error) {
+            throw error;
+          }
+
+          updated++;
+        } catch (error) {
+          console.warn(
+            `[SyncService] Failed to relink ${item.previousSheetId} -> ${item.row.sheet_id}:`,
+            error
+          );
+          errors++;
+        }
       }
     }
 
@@ -474,22 +570,51 @@ export class SyncService {
       }
     }
 
-    return { inserted, updated, errors, insertedReports };
+    if (unchanged > 0) {
+      console.log(
+        `[SyncService] Skipped ${unchanged} unchanged row(s); wrote ${inserted} insert(s), ${updated} update(s)`
+      );
+    }
+
+    return { inserted, updated, errors, insertedReports, unchanged };
   }
 
-  private static async relinkReportCommentReferences(
-    previousSheetId: string,
-    newSheetId: string
-  ) {
-    if (previousSheetId === newSheetId) return;
+  /**
+   * Carry every relinked report's children across the id change, as one
+   * transaction. Throws so the caller abandons the whole batch rather than
+   * committing report rows whose history it can no longer reach.
+   */
+  private static async relinkReportChildren(items: RelinkWorkItem[]) {
+    const pairs = items
+      .map((item) => ({
+        previous_id: item.existingId,
+        new_id: String(item.row.id || ''),
+        previous_sheet_id: item.previousSheetId,
+        new_sheet_id: String(item.row.sheet_id || ''),
+      }))
+      .filter((pair) => pair.new_id && pair.new_id !== pair.previous_id);
 
-    const { error } = await supabaseAdmin
-      .from('report_comments')
-      .update({ sheet_id: newSheetId })
-      .eq('sheet_id', previousSheetId);
+    if (pairs.length === 0) return;
 
-    if (error) {
-      console.warn('[SyncService] Failed to relink report comment references:', error);
+    const { data, error } = await supabaseAdmin.rpc('relink_report_children_batch', {
+      p_pairs: pairs,
+    });
+
+    if (error) throw error;
+
+    const moved = (data || {}) as Record<string, number>;
+    const total =
+      (moved.comments || 0) +
+      (moved.notifications || 0) +
+      (moved.documents || 0) +
+      (moved.evidence_files || 0);
+    if (total > 0) {
+      console.log(`[SyncService] Relinked ${total} child row(s) across ${pairs.length} report(s)`, moved);
+    }
+    if (moved.document_conflicts) {
+      console.warn(
+        `[SyncService] ${moved.document_conflicts} report document(s) left on a temporary id: the destination already has one`
+      );
     }
   }
 

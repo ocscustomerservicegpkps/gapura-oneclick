@@ -41,9 +41,8 @@ export function CardViewTable<T>({
   showHeader = false,
 }: CardViewTableProps<T>) {
 
-  const mobileColumns = columns.filter(
-    (col) => !col.priority || col.priority !== 'low'
-  );
+  // `!col.priority ||` was redundant: an absent priority is already `!== 'low'`.
+  const mobileColumns = columns.filter((col) => col.priority !== 'low');
 
   const primaryColumn = mobileColumns.find((col) => col.priority === 'high') || mobileColumns[0];
   const metaColumns = mobileColumns.filter((col) => col.key !== primaryColumn?.key);
@@ -80,7 +79,8 @@ export function CardViewTable<T>({
 
 interface CardItemProps<T> {
   row: T;
-  primaryColumn: TableColumn<T>;
+  /** Absent when every column is priority 'low', so mobileColumns comes out empty. */
+  primaryColumn?: TableColumn<T>;
   metaColumns: TableColumn<T>[];
   actions?: TableAction<T>[];
   onClick?: () => void;
@@ -121,9 +121,11 @@ function CardItem<T>({
       {}
       <div className="flex justify-between items-start gap-3 mb-3">
         <div className="flex-1 min-w-0">
-          <div className="font-semibold text-[var(--text-primary)] text-sm line-clamp-2">
-            {primaryColumn.accessor(row)}
-          </div>
+          {primaryColumn && (
+            <div className="font-semibold text-[var(--text-primary)] text-sm line-clamp-2">
+              {primaryColumn.accessor(row)}
+            </div>
+          )}
         </div>
 
         {}

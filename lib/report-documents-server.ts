@@ -54,6 +54,15 @@ async function removeObjects(paths: string[]): Promise<void> {
   if (error) throw new Error(`Failed to remove report documents: ${error.message}`);
 }
 
+/**
+ * Drop the Storage objects for report_documents rows that have already been
+ * deleted (see delete_report_cascade, which returns their paths). Kept here so
+ * the bucket stays this module's concern.
+ */
+export async function removeReportDocumentObjects(paths: string[]): Promise<void> {
+  await removeObjects(paths.filter((path) => typeof path === 'string' && path.trim().length > 0));
+}
+
 async function uploadObject(path: string, buffer: Buffer, contentType: string): Promise<void> {
   const { error } = await supabaseAdmin.storage.from(REPORT_DOCUMENTS_BUCKET).upload(path, buffer, {
     contentType,

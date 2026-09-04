@@ -69,13 +69,22 @@ export default function LoginForm() {
                 throw new Error(data?.error || 'Login failed');
             }
 
+            // Resolve against this origin and compare, rather than checking the
+            // string's prefix. The URL parser treats a backslash as a slash for
+            // http(s), so `/\evil.com` passes `startsWith('/')`, fails
+            // `startsWith('//')`, and still resolves to https://evil.com — an
+            // open redirect landing on the page right after a successful login.
             const requestedNext = new URLSearchParams(window.location.search).get('next');
-            const safeNext = requestedNext?.startsWith('/') && !requestedNext.startsWith('//')
-                ? requestedNext
-                : '';
-            if (safeNext) {
-                window.location.assign(safeNext);
-                return;
+            if (requestedNext) {
+                try {
+                    const target = new URL(requestedNext, window.location.origin);
+                    if (target.origin === window.location.origin) {
+                        window.location.assign(`${target.pathname}${target.search}${target.hash}`);
+                        return;
+                    }
+                } catch {
+                    // Unparseable `next` — fall through to the role-based redirect.
+                }
             }
 
             const normalizedRole = data?.role ? String(data.role).trim().toUpperCase() : '';

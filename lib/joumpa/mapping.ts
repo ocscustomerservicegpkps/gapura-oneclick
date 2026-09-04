@@ -417,6 +417,9 @@ export function buildRecordFromForm(input: JoumpaFormInput): JoumpaRow {
     non_corporate: clean(input.non_corporate) || null,
     customer_background_non_corporate: clean(input.customer_background_non_corporate) || null,
     detail_customer_non_corporate: clean(input.detail_customer_non_corporate) || null,
+    // Derived, not collected: the public form has no Detail Customer Joumpa
+    // field (see JoumpaFormInput), only the corporate / non-corporate pair.
+    // The sheet's own column of that name is read on the pull side instead.
     detail_customer_joumpa: clean(input.corporate ? input.detail_customer_corporate : input.detail_customer_non_corporate) || null,
     synced_at: nowIso,
     sync_version: 1,

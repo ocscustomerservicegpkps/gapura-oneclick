@@ -4,6 +4,7 @@ import { verifySession } from '@/lib/auth-utils';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { DEFAULT_EXTERNAL_LINKS, type ExternalLinkEntry } from '@/lib/external-links';
 import { getDefaultLinksArray } from '@/lib/external-links-server';
+import { isStorableHttpUrl } from '@/lib/security/url-validation';
 
 async function requireSuperAdmin() {
   const cookieStore = await cookies();
@@ -65,6 +66,14 @@ export async function PUT(request: Request) {
       if (!link.id || !link.label || !link.url || !link.category) {
         return NextResponse.json(
           { error: `Invalid link entry: id, label, url, and category are required. Got: ${JSON.stringify(link)}` },
+          { status: 400 }
+        );
+      }
+      // Every one of these is rendered as an href across the dashboards, so the
+      // scheme has to be checked here rather than assumed.
+      if (!isStorableHttpUrl(link.url)) {
+        return NextResponse.json(
+          { error: `Invalid link entry: "${link.id}" must have a valid http/https url` },
           { status: 400 }
         );
       }

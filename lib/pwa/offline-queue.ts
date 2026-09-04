@@ -26,7 +26,9 @@ function dispatchQueueUpdate(summary: Awaited<ReturnType<typeof getOfflineQueueS
 
 export async function refreshOfflineQueueSummary() {
   try {
-    const summary = await getOfflineQueueSummary();
+    // Scoped to the signed-in user, matching what queueOfflineReport stamps on
+    // each item — otherwise a shared device shows one user the other's counts.
+    const summary = await getOfflineQueueSummary(getPwaAuthScope());
     dispatchQueueUpdate(summary);
     return summary;
   } catch (error) {
@@ -65,7 +67,9 @@ export async function queueOfflineReport(
 
 export async function processOfflineQueueWithEvents() {
   try {
-    const result = await processOfflineQueue();
+    // Only this user's queued reports — replaying another user's items would
+    // submit them under whoever is signed in now.
+    const result = await processOfflineQueue(getPwaAuthScope());
     await refreshOfflineQueueSummary();
     return result;
   } catch (error) {

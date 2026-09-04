@@ -15,6 +15,8 @@ import { getClientIp } from '@/lib/security/utils';
 import { SyncService } from '@/lib/services/sync-service';
 import { checkDbRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
 
+const LOGIN_SYNC_COOLDOWN_MS = 10 * 60_000;
+
 export async function GET(request: Request) {
     return NextResponse.redirect(new URL('/auth/login', request.url));
 }
@@ -36,13 +38,21 @@ export async function POST(request: Request) {
             );
         }
 
+        const tooManyAttempts = () => NextResponse.json(
+            { error: 'Terlalu banyak percobaan login. Coba lagi dalam beberapa menit.' },
+            { status: 429 }
+        );
+
         const rateLimit = await checkDbRateLimit(`login:${clientIp}`, 10, 15 * 60_000);
-        if (!rateLimit.success) {
-            return NextResponse.json(
-                { error: 'Terlalu banyak percobaan login. Coba lagi dalam beberapa menit.' },
-                { status: 429 }
-            );
-        }
+        if (!rateLimit.success) return tooManyAttempts();
+
+        // Per-account as well as per-IP. Keyed only by IP, the limit did nothing
+        // against the shape that actually matters here: many source addresses
+        // guessing one account, where each address stays well inside its own
+        // allowance. The window is wider and the count lower because a real
+        // person does not need 20 tries at one address in an hour.
+        const accountLimit = await checkDbRateLimit(`login:acct:${email}`, 20, 60 * 60_000);
+        if (!accountLimit.success) return tooManyAttempts();
 
         const { data: user, error: fetchError } = await supabase
             .from('users')
@@ -182,7 +192,10 @@ export async function POST(request: Request) {
 
         after(async () => {
             try {
-                await SyncService.syncReportsFromSheets('login');
+                // Reconciliation only — the Sheets edit webhook is the live channel,
+                // so this may be up to 10 minutes stale. Without the cooldown a
+                // morning login rush pulls the entire Sheets corpus once per user.
+                await SyncService.syncReportsFromSheets('login', { minIntervalMs: LOGIN_SYNC_COOLDOWN_MS });
             } catch (syncErr) {
                 console.warn('[AUTH_API] Post-login background sync failed (non-blocking):', syncErr);
             }

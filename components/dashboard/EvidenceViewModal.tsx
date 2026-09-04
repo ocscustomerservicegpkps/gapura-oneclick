@@ -7,6 +7,7 @@ import { useState } from 'react';
 import NextImage from 'next/image';
 import { Button } from '@/components/ui/button';
 import { getEvidencePreviewUrl } from '@/lib/evidence-url';
+import { evidenceKindFromUrl } from '@/lib/evidence-mime';
 
 interface EvidenceViewModalProps {
   isOpen: boolean;
@@ -27,6 +28,7 @@ export function EvidenceViewModal({ isOpen, onClose, evidenceUrls }: EvidenceVie
   const currentUrl = validUrls[safeCurrentIndex];
   const previewUrl = currentUrl ? getEvidencePreviewUrl(currentUrl) : '';
   const previewFailed = Boolean(currentUrl && failedPreviews[currentUrl]);
+  const currentKind = evidenceKindFromUrl(currentUrl);
 
   const nextImage = () => {
     setCurrentIndex((prev) => (prev + 1) % validUrls.length);
@@ -64,16 +66,20 @@ export function EvidenceViewModal({ isOpen, onClose, evidenceUrls }: EvidenceVie
             {validUrls.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-gray-500">
                 <ImageIcon className="w-12 h-12 sm:w-16 sm:h-16 mb-4 text-gray-300" />
-                <p className="text-sm">No evidence photos available.</p>
+                <p className="text-sm">No evidence files available.</p>
               </div>
             ) : (
               <div className="relative w-full h-full flex flex-col items-center justify-center group">
                 {}
                 <div className="relative w-full h-[50vh] sm:h-[60vh] flex items-center justify-center bg-black/5 rounded-xl sm:rounded-2xl overflow-hidden">
-                  {previewFailed || !previewUrl ? (
+                  {previewFailed || !previewUrl || currentKind === 'document' ? (
                     <div className="flex flex-col items-center gap-4 px-6 text-center text-gray-600">
                       <FileText className="h-14 w-14 text-gray-300" />
-                      <p className="text-sm font-medium">Preview is not available for this file.</p>
+                      <p className="text-sm font-medium">
+                        {currentKind === 'document'
+                          ? 'Documents open in a new tab.'
+                          : 'Preview is not available for this file.'}
+                      </p>
                       {previewUrl && (
                         <a
                           href={previewUrl}
@@ -86,6 +92,16 @@ export function EvidenceViewModal({ isOpen, onClose, evidenceUrls }: EvidenceVie
                         </a>
                       )}
                     </div>
+                  ) : currentKind === 'video' ? (
+                    <video
+                      key={previewUrl}
+                      src={previewUrl}
+                      controls
+                      preload="metadata"
+                      playsInline
+                      className="h-full w-full bg-black object-contain"
+                      onError={() => setFailedPreviews((prev) => ({ ...prev, [currentUrl]: true }))}
+                    />
                   ) : (
                     <NextImage
                       src={previewUrl}

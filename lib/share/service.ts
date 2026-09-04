@@ -97,13 +97,19 @@ export async function updatePublishedDashboard(params: {
 }
 
 export async function revokePublishedDashboard(slug: string, createdBy: string): Promise<boolean> {
-  const { error } = await supabaseAdmin
+  // `count` rather than just the error: an update that matches nothing still
+  // succeeds, so a slug that does not exist — or belongs to someone else —
+  // reported the share as revoked while it stayed publicly reachable.
+  const { error, count } = await supabaseAdmin
     .from('published_dashboards')
-    .update({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .update(
+      { revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { count: 'exact' },
+    )
     .eq('slug', slug)
     .eq('created_by', createdBy);
 
-  return !error;
+  return !error && count === 1;
 }
 
 // Public lookup: security-definer RPC returns only safe columns for active

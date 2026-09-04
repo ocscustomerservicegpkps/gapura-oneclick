@@ -18,12 +18,20 @@ function resolveLogoutRedirect(request: Request) {
     const url = new URL(request.url);
     const redirect = url.searchParams.get('redirect');
     const appOrigin = getAppOrigin(request);
+    const fallback = new URL('/auth/login?logout=1', appOrigin);
 
-    if (redirect && redirect.startsWith('/') && !redirect.startsWith('//')) {
-        return new URL(redirect, appOrigin);
+    if (!redirect) return fallback;
+
+    // Resolve first, then compare origins. String-prefix checks are not enough:
+    // the URL parser treats a backslash as a slash for http(s), so `/\evil.com`
+    // passes `startsWith('/')`, fails `startsWith('//')`, and still resolves to
+    // https://evil.com — an open redirect off the logout link.
+    try {
+        const candidate = new URL(redirect, appOrigin);
+        return candidate.origin === fallback.origin ? candidate : fallback;
+    } catch {
+        return fallback;
     }
-
-    return new URL('/auth/login?logout=1', appOrigin);
 }
 
 async function destroySession(request: Request) {

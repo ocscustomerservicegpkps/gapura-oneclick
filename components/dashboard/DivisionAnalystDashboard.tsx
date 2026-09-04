@@ -685,10 +685,20 @@ export function DivisionAnalystDashboard({
     return { total, resolved, pending, highSeverity, resolutionRate, years };
   }, [dateRange, filteredReports, globalFilters, hasCompleteReports, initialOverview, lockedBranches]);
 
-  const drilldownUrl = (type: string, value: string) =>
-    `/dashboard/analyst/drilldown?type=${type}&value=${encodeURIComponent(
-      value
-    )}&period=${dateRange}`;
+  const drilldownUrl = (type: string, value: string) => {
+    const params = new URLSearchParams({ type, value });
+    if (typeof dateRange === 'string') {
+      params.set('period', dateRange);
+    } else {
+      // A custom {from,to} stringified to "[object Object]" here, which the
+      // drilldown page read as neither week nor month — it showed all-time data
+      // labelled "30 Hari Terakhir".
+      params.set('period', 'custom');
+      params.set('from', dateRange.from);
+      params.set('to', dateRange.to);
+    }
+    return `/dashboard/analyst/drilldown?${params.toString()}`;
+  };
 
   const availableOptions = useMemo(() => {
     if (!hasCompleteReports && initialOverview) return initialOverview.filterOptions;
@@ -1154,7 +1164,10 @@ export function DivisionAnalystDashboard({
         {showReportsExportModal && (
           <ReportsExportModal
             open
-            reports={filteredReports.length > 0 ? filteredReports : reports}
+            /* A filter that matches nothing means export nothing — falling back
+               to the unfiltered set quietly exported the whole corpus, branches
+               the user had filtered out included. */
+            reports={filteredReports}
             onClose={() => setShowReportsExportModal(false)}
           />
         )}

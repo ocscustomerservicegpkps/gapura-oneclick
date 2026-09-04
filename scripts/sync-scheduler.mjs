@@ -3,7 +3,14 @@
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import { google } from 'googleapis';
-import crypto from 'crypto';
+import { v5 as uuidv5 } from 'uuid';
+import { buildReportFingerprint } from '../lib/report-fingerprint.ts';
+import { formatWibDate, parseDate } from '../lib/wib-date.ts';
+import { checkOrphanDeletion, diffAgainstStored, stripAppOwnedColumns } from '../lib/report-sync-guard.ts';
+
+// Must match ReportsService.getReportUuid / buildReportsSyncRow — a stored
+// row's id has to equal uuidv5(sheet_id) or the app cannot find it.
+const IRRS_NAMESPACE_UUID = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
 const DRY_RUN = Boolean(process.env.DRY_RUN);
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
@@ -92,78 +99,20 @@ function normalizeText(val) {
   return raw.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function normalizeDate(val) {
-  if (!val) return '';
-  if (val instanceof Date) return Number.isNaN(val.getTime()) ? '' : val.toISOString().slice(0, 10);
-  if (typeof val === 'number') {
-    const d = new Date(Math.round((val - 25569) * 86400000));
-    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-  }
-  const s = String(val).trim();
-  if (!s) return '';
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-}
+// buildReportFingerprint is imported from lib/report-fingerprint, not
+// reimplemented here. This script used to carry its own copy, and the copy had
+// drifted: it was missing root_caused and action_taken, resolved branch and
+// area-category differently, and normalized unparseable dates to ''. Every
+// stored fingerprint is written by the app's version, so the copy disagreed
+// with all of them — the script saw all 1179 rows as changed on every run, and
+// writing them replaced each row's fingerprint with the drifted value, which
+// then made the app's own sync see every row as changed too.
 
-function buildFingerprint(r) {
-  const parts = [
-    normalizeText(r.source_sheet),
-    normalizeDate(r.date_of_event || r.incident_date || r.created_at),
-    normalizeText(r.branch || r.reporting_branch || r.station_code),
-    normalizeText(r.airline || r.airlines),
-    normalizeText(r.flight_number),
-    normalizeText(r.route),
-    normalizeText(r.main_category || r.category),
-    normalizeText(r.irregularity_complain_category),
-    normalizeText(r.area),
-    normalizeText(r.terminal_area_category || r.apron_area_category || r.general_category),
-    normalizeText(r.report || r.description || r.title),
-    normalizeText(r.reporter_name),
-  ];
-  return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
-}
-
-const MonthMap = {
-  januari:0,jan:0,februari:1,feb:1,maret:2,mar:2,april:3,apr:3,
-  mei:4,juni:5,jun:5,juli:6,jul:6,agustus:7,ags:7,agt:7,
-  september:8,sep:8,oktober:9,okt:9,november:10,nov:10,desember:11,des:11,
-};
-
-function parseDate(val) {
-  if (!val) return null;
-  if (val instanceof Date) return Number.isNaN(val.getTime()) ? null : val;
-  if (typeof val === 'number') {
-    const d = new Date(Math.round((val - 25569) * 86400000));
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  const s = String(val).trim();
-  if (!s) return null;
-  const iso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-  if (iso) { const d = new Date(+iso[1], +iso[2] - 1, +iso[3]); if (!Number.isNaN(d.getTime())) return d; }
-  const parts = s.toLowerCase().split(/[\s,/-]+/);
-  if (parts.length >= 2) {
-    let day = 1, month = -1, year = -1;
-    const yi = parts.findIndex(p => /^\d{4}$/.test(p));
-    if (yi !== -1) {
-      year = +parts[yi];
-      for (let i = 0; i < parts.length; i++) {
-        if (i === yi) continue;
-        if (MonthMap[parts[i]] !== undefined) {
-          month = MonthMap[parts[i]];
-          const dc = [parts[i-1], parts[i+1]].filter(p => p && /^\d{1,2}$/.test(p));
-          if (dc.length) day = +dc[0];
-          break;
-        }
-      }
-    }
-    if (year !== -1 && month !== -1) return new Date(year, month, day);
-  }
-  const dmy = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
-  if (dmy) { const d = new Date(+dmy[3], +dmy[2] - 1, +dmy[1]); if (!Number.isNaN(d.getTime())) return d; }
-  const fallback = new Date(s);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
-}
-
+// parseDate/formatWibDate likewise come from lib/wib-date. The copy here built
+// dates with new Date(y, m, d) — midnight in the *process* timezone — so the
+// same sheet cell resolved to a different day in dev (Asia/Jakarta) than on a
+// UTC host, and .toISOString().slice(0,10) then stored the UTC day. 50 rows
+// were a day behind what the app stored for the same cell.
 function toIsoOrNow(val) {
   const d = parseDate(val);
   return d ? d.toISOString() : new Date().toISOString();
@@ -266,6 +215,68 @@ function buildColumnIndexMap(headers) {
   return colMap;
 }
 
+/** Non-enumerable flag parseRow leaves on a row; never reaches the wire. */
+const SHEET_STATUS_MARK = Symbol('hasSheetStatus');
+
+/**
+ * Columns this script used to invent rather than read. severity/priority were
+ * hardcoded 'low'; is_flight_related and immediate_action were derived from
+ * other cells. The app's sync derives all four differently — it stores 'LOW',
+ * is_flight_related false, immediate_action null — so every run rewrote them
+ * and the app's next run rewrote them back. The sheet is not their source, so
+ * this script has no business writing them.
+ */
+const SCHEDULER_DERIVED_COLUMNS = [
+  'severity', 'priority', 'is_flight_related', 'is_gse_related', 'immediate_action',
+];
+
+/**
+ * Written when creating a row, never overwritten on an existing one.
+ *
+ * created_at is a creation timestamp — this script derives it from the event
+ * date, which is fine for a new row but has no business rewriting an existing
+ * one. resolved_at is derived from status rather than read from the sheet, and
+ * the app maintains its own. Both are excluded from change detection anyway, so
+ * carrying them forward costs nothing.
+ *
+ * date_of_event / incident_date are deliberately NOT here: those are the
+ * sheet's to change, and a mirror that ignored edits to them would be useless.
+ */
+const SCHEDULER_INSERT_ONLY_COLUMNS = ['created_at', 'resolved_at'];
+
+/**
+ * The row as it will actually be written. A null from the sheet is not an
+ * instruction to clear a stored value — the parser cannot tell "this sheet has
+ * no such column" from "this cell is empty", and for a mirror of the sheet the
+ * safe reading of an absent value is "leave what is there". So nulls fall back
+ * to the stored value, which also keeps every row's key set identical (parseRow
+ * always emits the same keys) — PostgREST pads a batch to the union of its
+ * keys, so a row missing one would have it reset to DEFAULT.
+ */
+function effectivePayload(row, existing) {
+  const payload = toPayload(row, existing);
+  if (!existing) return payload;
+
+  const merged = {};
+  for (const [key, value] of Object.entries(payload)) {
+    merged[key] = SCHEDULER_INSERT_ONLY_COLUMNS.includes(key)
+      ? existing[key] ?? value
+      : value ?? existing[key] ?? null;
+  }
+  return merged;
+}
+
+/**
+ * The sheet is authoritative for the columns it actually carries — and only
+ * those. Anything the app owns is already gone (stripAppOwnedColumns), and a
+ * sheet with no Status column must not reset the workflow status every run, so
+ * the stored value is carried forward instead of normalizeStatus's 'OPEN'.
+ */
+function toPayload(row, existing) {
+  if (row[SHEET_STATUS_MARK]) return row;
+  return { ...row, status: existing?.status ?? row.status };
+}
+
 function parseRow(raw, colMap, sheetName, rowIndex) {
   const rowNumber = rowIndex + 2;
   const sheetId = `${sheetName}!row_${rowNumber}`;
@@ -277,7 +288,11 @@ function parseRow(raw, colMap, sheetName, rowIndex) {
   };
 
   const eventDate = parseDate(get('date_of_event'));
-  const dateOfEvent = eventDate ? eventDate.toISOString() : null;
+  // The instant is midnight WIB, which in UTC is 17:00 the day before — so the
+  // calendar day has to come from formatWibDate, not from slicing the ISO
+  // string. Slicing is what put 50 rows a day behind the app's value.
+  const eventInstant = eventDate ? eventDate.toISOString() : null;
+  const eventDay = eventDate ? formatWibDate(eventDate) : null;
 
   const evidenceRaw = get('evidence_url') || '';
   const evidenceUrls = evidenceRaw ? evidenceRaw.split(/\s*(?:\||;|\n+)\s*/).map(s => s.trim()).filter(Boolean) : null;
@@ -290,7 +305,8 @@ function parseRow(raw, colMap, sheetName, rowIndex) {
   }
 
   const mainCat = normalizeCategory(get('main_category') || get('irregularity_complain_category') || get('accident_incident'));
-  const status = normalizeStatus(get('status'));
+  const sheetStatus = get('status');
+  const status = normalizeStatus(sheetStatus);
   const hasJoumpaFields = Boolean(
     get('category_case_joumpa') ||
     get('reservation_scheduling') ||
@@ -352,11 +368,11 @@ function parseRow(raw, colMap, sheetName, rowIndex) {
     station_id: get('branch') || get('reporting_branch') || null,
     category: mainCat || null,
     main_category: mainCat || null,
-    date_of_event: dateOfEvent ? dateOfEvent.slice(0, 10) : null,
-    incident_date: dateOfEvent ? dateOfEvent.slice(0, 10) : null,
-    created_at: dateOfEvent || toIsoOrNow(null),
+    date_of_event: eventDay,
+    incident_date: eventDay,
+    created_at: eventInstant || toIsoOrNow(null),
     updated_at: toIsoOrNow(null),
-    resolved_at: status === 'CLOSED' ? (dateOfEvent || toIsoOrNow(null)) : null,
+    resolved_at: status === 'CLOSED' ? (eventInstant || toIsoOrNow(null)) : null,
     reporting_branch: get('reporting_branch') || null,
     hub: get('hub') || null,
     route: get('route') || null,
@@ -377,7 +393,6 @@ function parseRow(raw, colMap, sheetName, rowIndex) {
     kps_remarks: get('kps_remarks') || null,
     gapura_kps_action_taken: get('gapura_kps_action_taken') || null,
     preventive_action: get('preventive_action') || null,
-    remarks_gapura_kps: null,
     irregularity_complain_category: get('irregularity_complain_category') || null,
     service_business_type: serviceBusinessType,
     remarks_case: domainCaseCategory || get('supporting_evidence') || null,
@@ -419,12 +434,16 @@ function parseRow(raw, colMap, sheetName, rowIndex) {
     sync_version: 1,
   };
 
-  dbRow.source_fingerprint = buildFingerprint(dbRow);
+  dbRow.source_fingerprint = buildReportFingerprint(dbRow);
 
-  const cleaned = {};
-  for (const [k, v] of Object.entries(dbRow)) {
-    if (VALID_COLUMNS.has(k)) cleaned[k] = v;
+  const cleaned = stripAppOwnedColumns(dbRow);
+  for (const k of SCHEDULER_DERIVED_COLUMNS) delete cleaned[k];
+  for (const k of Object.keys(cleaned)) {
+    if (!VALID_COLUMNS.has(k)) delete cleaned[k];
   }
+  // Not a column: tells toPayload whether `status` above came from the sheet or
+  // is just normalizeStatus's 'OPEN' fallback. Stripped before every write.
+  Object.defineProperty(cleaned, SHEET_STATUS_MARK, { value: Boolean(sheetStatus), enumerable: false });
   return cleaned;
 }
 
@@ -462,7 +481,11 @@ async function fetchSupabaseRecords() {
   while (hasMore) {
     const { data, error } = await supabase
       .from('ground_handling_irregularity_report')
-      .select('id, sheet_id, source_sheet, source_fingerprint, synced_at')
+      // Whole rows: change detection compares the full payload against what is
+      // stored, and source_fingerprint alone cannot do that job — it covers 14
+      // identity fields, so a sheet edit to status, evidence, preventive_action
+      // or any other column leaves it identical.
+      .select('*')
       .order('sheet_id', { ascending: true })
       .range(offset, offset + PAGE_SIZE - 1);
 
@@ -475,6 +498,27 @@ async function fetchSupabaseRecords() {
 
   log('INFO', `Fetched ${records.length} records from reports_sync`);
   return records;
+}
+
+/**
+ * Would writing this payload change anything? Compares it against the stored
+ * row projected onto the payload's own columns, so columns this script does not
+ * write (and the volatile stamps buildRowContentHash already excludes) cannot
+ * make an unchanged row look dirty.
+ *
+ * Deliberately not the stored content_hash column: that one is written by the
+ * app's sync over a different, larger column set, so the two hashes are not
+ * comparable and each writer must judge its own payload.
+ */
+function rowNeedsWrite(payload, existing) {
+  const differing = diffAgainstStored(payload, existing);
+  if (differing.length === 0) return false;
+
+  if (process.env.SYNC_DEBUG && existing) {
+    log('DEBUG', `${payload.sheet_id} differs on: ${differing.join(', ')}`,
+      differing.slice(0, 4).map((key) => ({ key, sheet: payload[key], db: existing[key] })));
+  }
+  return true;
 }
 
 function computeDiff(sheetRows, dbRecords) {
@@ -498,15 +542,20 @@ function computeDiff(sheetRows, dbRecords) {
   for (const row of sheetRows) {
     const existing = dbBySheetId.get(row.sheet_id);
     if (existing) {
-      if (existing.source_fingerprint !== row.source_fingerprint) {
-        toUpsert.push({ row, kind: 'update' });
+      if (rowNeedsWrite(effectivePayload(row, existing), existing)) {
+        toUpsert.push({ row, kind: 'update', existing });
       }
     } else {
       const fpMatches = row.source_fingerprint ? (dbByFingerprint.get(row.source_fingerprint) || []) : [];
       if (fpMatches.length === 1) {
-        relinks.push({ row, existingId: fpMatches[0].id, previousSheetId: fpMatches[0].sheet_id });
+        relinks.push({
+          row,
+          existing: fpMatches[0],
+          existingId: fpMatches[0].id,
+          previousSheetId: fpMatches[0].sheet_id,
+        });
       } else {
-        toUpsert.push({ row, kind: 'insert' });
+        toUpsert.push({ row, kind: 'insert', existing: null });
       }
     }
   }
@@ -520,67 +569,153 @@ function computeDiff(sheetRows, dbRecords) {
   return { toUpsert, relinks, orphans };
 }
 
+async function writeBatches(rows, label) {
+  let errors = 0;
+  for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
+    const batch = rows.slice(i, i + UPSERT_BATCH);
+    const bn = Math.floor(i / UPSERT_BATCH) + 1;
+    const tb = Math.ceil(rows.length / UPSERT_BATCH);
+    log('INFO', `Upserting ${label} batch ${bn}/${tb} (${batch.length} rows)...`);
+
+    const { error } = await supabase
+      .from('ground_handling_irregularity_report')
+      .upsert(batch, { onConflict: 'sheet_id', ignoreDuplicates: false });
+
+    if (error) {
+      log('ERROR', `Upsert ${label} batch ${bn} failed: ${error.message}`);
+      errors += batch.length;
+    }
+  }
+  return errors;
+}
+
 async function executeUpsert(toUpsert, relinks) {
   let inserted = 0, updated = 0, relinked = 0, errors = 0;
 
   if (toUpsert.length > 0) {
-    const rows = toUpsert.map(x => x.row);
-    const inserts = toUpsert.filter(x => x.kind === 'insert').length;
-    const updates = toUpsert.filter(x => x.kind === 'update').length;
+    // Inserts pin id = uuidv5(sheet_id); without it Postgres assigns a random
+    // v4 default and the app — which derives a report's id from its sheet
+    // position (ReportsService.getReportUuid) — can never find the row.
+    // Updates must NOT carry id: the stored row already has the right one, and
+    // rewriting a primary key is what strands a report's comments and evidence.
+    // Separate batches because PostgREST pads a batch to the union of its keys.
+    const insertRows = toUpsert
+      .filter(x => x.kind === 'insert')
+      .map(x => ({ ...toPayload(x.row, x.existing), id: uuidv5(x.row.sheet_id, IRRS_NAMESPACE_UUID) }));
+    const updateRows = toUpsert
+      .filter(x => x.kind === 'update')
+      .map(x => effectivePayload(x.row, x.existing));
 
     if (DRY_RUN) {
-      log('INFO', `[DRY RUN] Would upsert ${rows.length} rows (${inserts} new, ${updates} changed)`);
-      inserted = inserts;
-      updated = updates;
+      log('INFO', `[DRY RUN] Would upsert ${toUpsert.length} rows (${insertRows.length} new, ${updateRows.length} changed)`);
+      inserted = insertRows.length;
+      updated = updateRows.length;
     } else {
-      for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-        const batch = rows.slice(i, i + UPSERT_BATCH);
-        const bn = Math.floor(i / UPSERT_BATCH) + 1;
-        const tb = Math.ceil(rows.length / UPSERT_BATCH);
-        log('INFO', `Upserting batch ${bn}/${tb} (${batch.length} rows)...`);
-
-        const { error } = await supabase
-          .from('ground_handling_irregularity_report')
-          .upsert(batch, { onConflict: 'sheet_id', ignoreDuplicates: false });
-
-        if (error) {
-          log('ERROR', `Upsert batch ${bn} failed: ${error.message}`);
-          errors += batch.length;
-        }
-      }
-      inserted = inserts;
-      updated = updates;
+      // Counts have to come from what was written, not what was attempted —
+      // a failed batch was previously still reported as inserted/updated in
+      // the summary, right next to the error count that contradicted it.
+      const insertErrors = await writeBatches(insertRows, 'insert');
+      const updateErrors = await writeBatches(updateRows, 'update');
+      errors += insertErrors + updateErrors;
+      inserted = insertRows.length - insertErrors;
+      updated = updateRows.length - updateErrors;
     }
   }
 
-  for (const item of relinks) {
-    if (DRY_RUN) {
-      relinked++;
+  if (relinks.length > 0 && DRY_RUN) {
+    relinked = relinks.length;
+    for (const item of relinks) {
       log('INFO', `[DRY RUN] Would relink ${item.previousSheetId} -> ${item.row.sheet_id}`);
-      continue;
     }
+  } else if (relinks.length > 0) {
+    // The app derives a report's id as uuidv5(sheet_id), so once the sheet_id
+    // moves the stored id no longer matches what the app looks up by. Children
+    // and row have to move together — and the children of the whole shift in
+    // one call, because a sheet insert turns a run of rows into a chain of
+    // mappings that, applied one at a time, sweeps each report's children into
+    // the next report's id (see relink_report_children_batch).
+    const newIdFor = (item) => uuidv5(item.row.sheet_id, IRRS_NAMESPACE_UUID);
+    const { error: relinkError } = await supabase.rpc('relink_report_children_batch', {
+      p_pairs: relinks.map((item) => ({
+        previous_id: item.existingId,
+        new_id: newIdFor(item),
+        previous_sheet_id: item.previousSheetId,
+        new_sheet_id: item.row.sheet_id,
+      })),
+    });
 
-    const { error } = await supabase
-      .from('ground_handling_irregularity_report')
-      .update(item.row)
-      .eq('id', item.existingId);
-
-    if (error) {
-      log('ERROR', `Relink failed ${item.previousSheetId}: ${error.message}`);
-      errors++;
+    if (relinkError) {
+      log('ERROR', `Relink of child rows failed, skipping all ${relinks.length} relinks: ${relinkError.message}`);
+      errors += relinks.length;
     } else {
-      relinked++;
+      for (const item of relinks) {
+        const { error } = await supabase
+          .from('ground_handling_irregularity_report')
+          .update({ ...effectivePayload(item.row, item.existing), id: newIdFor(item) })
+          .eq('id', item.existingId);
+
+        if (error) {
+          log('ERROR', `Relink failed ${item.previousSheetId}: ${error.message}`);
+          errors++;
+        } else {
+          relinked++;
+        }
+      }
     }
   }
 
   return { inserted, updated, relinked, errors };
 }
 
-async function deleteOrphans(orphans) {
-  if (orphans.length === 0) return 0;
+function groupBySheet(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const sheet = row.source_sheet || 'UNKNOWN';
+    if (!grouped.has(sheet)) grouped.set(sheet, []);
+    grouped.get(sheet).push(row);
+  }
+  return grouped;
+}
+
+/**
+ * Orphans are derived from what the sheet returned, so a sheet that failed to
+ * load, was renamed, or came back filtered makes its whole stored history look
+ * deletable. Vet each sheet's orphans on its own before deleting anything: one
+ * broken tab must not be able to take out the tabs that read fine.
+ */
+function partitionDeletableOrphans(orphans, sheetRows, dbRecords) {
+  const parsedPerSheet = groupBySheet(sheetRows);
+  const storedPerSheet = groupBySheet(dbRecords);
+  const deletable = [];
+  let blocked = 0;
+
+  for (const [sheet, sheetOrphans] of groupBySheet(orphans)) {
+    const verdict = checkOrphanDeletion({
+      scope: sheet,
+      parsedRows: parsedPerSheet.get(sheet)?.length || 0,
+      storedRows: storedPerSheet.get(sheet)?.length || 0,
+      orphanRows: sheetOrphans.length,
+    });
+    if (verdict.allowed) {
+      log('INFO', `Orphan guard: ${verdict.reason}`);
+      deletable.push(...sheetOrphans);
+    } else {
+      log('ERROR', `Orphan guard BLOCKED ${verdict.reason}`);
+      blocked += sheetOrphans.length;
+    }
+  }
+
+  return { deletable, blocked };
+}
+
+async function deleteOrphans(allOrphans, sheetRows, dbRecords) {
+  if (allOrphans.length === 0) return { deleted: 0, blocked: 0 };
+
+  const { deletable: orphans, blocked } = partitionDeletableOrphans(allOrphans, sheetRows, dbRecords);
+  if (orphans.length === 0) return { deleted: 0, blocked };
   if (DRY_RUN) {
     log('INFO', `[DRY RUN] Would delete ${orphans.length} orphaned records`);
-    return 0;
+    return { deleted: 0, blocked };
   }
 
   let totalDeleted = 0;
@@ -600,7 +735,7 @@ async function deleteOrphans(orphans) {
     if (error) { log('ERROR', `Delete batch failed: ${error.message}`); continue; }
     totalDeleted += data?.length || 0;
   }
-  return totalDeleted;
+  return { deleted: totalDeleted, blocked };
 }
 
 async function verifyConsistency(sheetRows) {
@@ -638,7 +773,7 @@ async function verifyConsistency(sheetRows) {
   }
 }
 
-function printSummary({ sheetRows, dbRecords, diff, result, deleted, duration }) {
+function printSummary({ sheetRows, dbRecords, diff, result, deleted, blocked, duration }) {
   console.log('');
   console.log('================================================================');
   console.log(`  SYNC SCHEDULER ${DRY_RUN ? '(DRY RUN) ' : ''}REPORT`);
@@ -650,6 +785,7 @@ function printSummary({ sheetRows, dbRecords, diff, result, deleted, duration })
   console.log(`  Updated (fingerprint d):  ${result.updated}`);
   console.log(`  Relinked (row shifted):   ${result.relinked}`);
   console.log(`  Orphans deleted:          ${deleted}`);
+  console.log(`  Orphans blocked by guard: ${blocked}`);
   console.log(`  Errors:                   ${result.errors}`);
   console.log(`  Duration:                 ${(duration / 1000).toFixed(2)}s`);
   console.log('================================================================');
@@ -694,7 +830,7 @@ async function main() {
   }
 
   const result = await executeUpsert(diff.toUpsert, diff.relinks);
-  const deleted = await deleteOrphans(diff.orphans);
+  const { deleted, blocked } = await deleteOrphans(diff.orphans, sheetRows, dbRecords);
 
   if (!DRY_RUN) await verifyConsistency(sheetRows);
 
@@ -705,10 +841,11 @@ async function main() {
     diff,
     result,
     deleted,
+    blocked,
     duration,
   });
 
-  if (result.errors > 0) process.exit(2);
+  if (result.errors > 0 || blocked > 0) process.exit(2);
   process.exit(0);
 }
 

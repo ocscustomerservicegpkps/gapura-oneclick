@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import { verifySession } from '@/lib/auth-utils';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { getDashboardOverview } from '@/lib/dashboard/dashboard-overview';
+import { quoteForPostgrestFilter } from '@/lib/security/postgrest';
 
 // Narrowed column lists (verified against the live schema) instead of
 // select('*'): both tables carry dozens of columns (GSE/JOUMPA-specific
@@ -87,7 +88,17 @@ export async function GET() {
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    const stationCode = station?.code || stationId;
+    // No silent fall back to the station UUID. A uuid matches no station_code
+    // anywhere, so every query keyed off it came back empty and the manager saw
+    // a dashboard of zeros that looked like a quiet month rather than a failed
+    // lookup.
+    if (!station?.code) {
+        console.error('[MANAGER_DASHBOARD] Station lookup failed for', stationId);
+        return NextResponse.json({ error: 'Station tidak ditemukan' }, { status: 500 });
+    }
+    const stationCode = String(station.code);
+    // Interpolated into a raw PostgREST filter string below.
+    const safeStationCode = quoteForPostgrestFilter(stationCode);
 
     // The exact-aggregate RPC only covers ground_handling_irregularity_report,
     // so its summary is combined below with a JOUMPA count computed from the
@@ -98,8 +109,17 @@ export async function GET() {
         supabaseAdmin
             .from('joumpa_reports_sync')
             .select(JOUMPA_FIELDS)
-            .or(`station_code.eq.${stationCode},station.eq.${stationCode}`),
+            .or(`station_code.eq.${safeStationCode},station.eq.${safeStationCode}`),
     ]);
+
+    // Checked before the counts are read: destructuring only `.data` turned a
+    // failed JOUMPA query into "zero JOUMPA reports", which is indistinguishable
+    // from a real zero on the dashboard it feeds.
+    if (joumpaResult.error) {
+        console.error('[MANAGER_DASHBOARD] JOUMPA query failed:', joumpaResult.error);
+        return NextResponse.json({ error: joumpaResult.error.message }, { status: 500 });
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const joumpaRows = joumpaResult.data as any[] | null;
 

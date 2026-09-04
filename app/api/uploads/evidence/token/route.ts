@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-import { generateUploadToken, checkRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
+import { checkDbRateLimit, generateUploadToken, getClientIpFromRequest } from '@/lib/security/rate-limit';
 
 export async function GET(request: Request) {
     const ip = getClientIpFromRequest(request);
-    const rl = checkRateLimit(`upload-token:${ip}`, 10, 60_000);
+    const rl = await checkDbRateLimit(`upload-token:${ip}`, 10, 60_000);
     if (!rl.success) {
         return NextResponse.json(
             { error: 'Too many token requests. Please try again later.' },

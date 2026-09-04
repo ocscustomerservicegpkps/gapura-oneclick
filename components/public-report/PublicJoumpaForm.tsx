@@ -17,10 +17,10 @@ import {
 import type { DocEdits } from './wizard-shared';
 import { WizardStep } from '@/components/ui/WizardStep';
 import { Field, FormShell, InlineShell, Options, Section, StepFooter, StepProgress, compressImage, resolveOther } from './apple-form-shell';
+import { EVIDENCE_ACCEPT, EVIDENCE_HINT, checkEvidenceFile } from '@/lib/evidence-mime';
 import DocumentEditorStep from './DocumentEditorStep';
 
 const MAX_FILES = 5;
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const TOTAL_STEPS = 6;
 
 interface Station { id: string; code: string; name: string }
@@ -143,8 +143,8 @@ export default function PublicJoumpaForm({
     const next = [...files];
     for (const f of Array.from(incoming)) {
       if (next.length >= MAX_FILES) break;
-      if (!f.type.startsWith('image/')) { setError(`${f.name}: only images are supported`); continue; }
-      if (f.size > MAX_FILE_BYTES) { setError(`${f.name} exceeds 10 MB`); continue; }
+      const check = checkEvidenceFile(f);
+      if (!check.ok) { setError(check.error); continue; }
       next.push(f);
     }
     setFiles(next);
@@ -160,9 +160,10 @@ export default function PublicJoumpaForm({
     }
     const station = stations.find((s) => s.id === form.station_id);
     const uploadOne = async (file: File) => {
-      const compressed = await compressImage(file);
+      // Only images survive a canvas round-trip — videos and documents are sent as-is.
+      const payload = checkEvidenceFile(file).kind === 'image' ? await compressImage(file) : file;
       const fd = new FormData();
-      fd.append('file', compressed);
+      fd.append('file', payload);
       fd.append('evidence_submission_id', submissionId);
       fd.append('reporter_name', form.report_by.trim());
       fd.append('reporter_email', form.reporter_email.trim());
@@ -453,18 +454,18 @@ export default function PublicJoumpaForm({
             <WizardStep isActive={step === 6}>
               <Section
                 title={<>Evidence<span className="jm-req" aria-hidden>*</span></>}
-                subtitle={`At least 1 photo required — up to ${MAX_FILES} images, 10 MB each`}
+                subtitle={`At least 1 file required — up to ${MAX_FILES} attachments`}
               >
                 <label className={cn('jm-drop', files.length >= MAX_FILES && 'jm-drop--full')}>
                   <Upload size={20} strokeWidth={1.6} />
-                  <span className="jm-drop__title">Add photos</span>
-                  <span className="jm-drop__hint">Click to select images</span>
-                  <input type="file" multiple accept="image/*" className="hidden"
+                  <span className="jm-drop__title">Add attachments</span>
+                  <span className="jm-drop__hint">{EVIDENCE_HINT}</span>
+                  <input type="file" multiple accept={EVIDENCE_ACCEPT} className="hidden"
                     onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
                     disabled={files.length >= MAX_FILES} />
                 </label>
                 {files.length === 0 && (
-                  <p className="jm-evidence-required-msg">At least one photo is required to submit this report.</p>
+                  <p className="jm-evidence-required-msg">At least one attachment is required to submit this report.</p>
                 )}
                 {files.length > 0 && (
                   <ul className="jm-files">

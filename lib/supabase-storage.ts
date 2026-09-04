@@ -24,7 +24,23 @@ function sanitizeSegment(value: string, fallback: string): string {
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 80);
-  return safe || fallback;
+  // The allowlist keeps `.`, so `..` passed through untouched — and station
+  // codes reach evidencePrefix() straight from the public upload form. A
+  // segment that is nothing but dots can only be a traversal attempt.
+  if (!safe || /^\.+$/.test(safe)) return fallback;
+  return safe;
+}
+
+/**
+ * Reduces a caller-supplied prefix to plain directory segments. `uploadToStorage`
+ * is exported, so its `prefix` contract has to be enforced here rather than
+ * assumed from the two internal builders that happen to satisfy it today.
+ */
+function sanitizePrefix(prefix: string): string {
+  return prefix
+    .split('/')
+    .filter((segment) => segment !== '' && !/^\.+$/.test(segment))
+    .join('/');
 }
 
 export interface CompressedUpload {
@@ -114,7 +130,8 @@ export async function uploadToStorage(input: StorageUploadInput): Promise<Storag
   const compressed = await compressForUpload(input.buffer, input.mimeType, input.originalName);
   const baseName = input.originalName.replace(/\.[a-z0-9]+$/i, '');
   const safeBase = sanitizeSegment(baseName, 'file');
-  const folder = input.prefix.replace(/^\/+|\/+$/g, '');
+  const folder = sanitizePrefix(input.prefix);
+  if (!folder) throw new Error('Storage upload failed: empty prefix');
   const path = `${folder}/${randomUUID()}-${safeBase}.${compressed.ext}`;
 
   const { error } = await supabaseAdmin.storage.from(STORAGE_BUCKET).upload(path, compressed.buffer, {

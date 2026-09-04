@@ -21,6 +21,13 @@ export default function AnalystDrilldownPage() {
     const type = searchParams.get('type') || '';
     const value = searchParams.get('value') || '';
     const period = searchParams.get('period') || 'all';
+    // A custom range arrives as from/to. Interpolating the {from,to} object into
+    // the URL produced period=[object Object], which matched neither 'week' nor
+    // 'month' — so every custom-range drilldown silently showed all-time data
+    // under a '30 Hari Terakhir' heading.
+    const customFrom = searchParams.get('from');
+    const customTo = searchParams.get('to');
+    const hasCustomRange = period === 'custom' && Boolean(customFrom && customTo);
 
     const [allReports, setAllReports] = useState<Report[]>([]);
     const [loading, setLoading] = useState(true);
@@ -38,7 +45,10 @@ export default function AnalystDrilldownPage() {
                 if (type === 'area') params.set('area', value);
                 if (type === 'severity' && value !== 'all') params.set('severity', value);
 
-                if (period !== 'all') {
+                if (hasCustomRange) {
+                    params.set('from', new Date(`${customFrom}T00:00:00+07:00`).toISOString());
+                    params.set('to', new Date(`${customTo}T23:59:59+07:00`).toISOString());
+                } else if (period !== 'all') {
                     const daysBack = period === 'week' ? 7 : period === 'month' ? 30 : 0;
                     if (daysBack > 0) {
                         params.set('from', new Date(Date.now() - daysBack * 86_400_000).toISOString());
@@ -59,12 +69,22 @@ export default function AnalystDrilldownPage() {
         };
         fetchReports();
         return () => { active = false; };
-    }, [period, type, value]);
+    }, [period, type, value, hasCustomRange, customFrom, customTo]);
 
     const filteredReports = useMemo(() => {
 
         let filtered = allReports;
-        if (period !== 'all') {
+        if (hasCustomRange) {
+            const from = new Date(`${customFrom}T00:00:00+07:00`).getTime();
+            const to = new Date(`${customTo}T23:59:59+07:00`).getTime();
+            filtered = filtered.filter(r => {
+                // date_of_event first, matching the dashboard this drilldown is
+                // reached from — filtering on created_at here put a report in
+                // the range on one screen and out of it on the next.
+                const at = new Date(r.date_of_event || r.created_at).getTime();
+                return at >= from && at <= to;
+            });
+        } else if (period !== 'all') {
             const now = new Date();
             const daysMap: Record<string, number> = { week: 7, month: 30 };
             const daysBack = daysMap[period] || 0;
@@ -105,7 +125,7 @@ export default function AnalystDrilldownPage() {
             default:
                 return filtered;
         }
-    }, [allReports, type, value, period]);
+    }, [allReports, type, value, period, hasCustomRange, customFrom, customTo]);
 
     const title = useMemo(() => {
         const base = TITLE_MAP[type] || 'Report Detail';
@@ -115,7 +135,7 @@ export default function AnalystDrilldownPage() {
     return (
         <DrilldownDetailView
             title={title}
-            subtitle={period !== 'all' ? `Periode: ${period === 'week' ? '7 Hari Terakhir' : '30 Hari Terakhir'}` : undefined}
+            subtitle={hasCustomRange ? `Periode: ${customFrom} s/d ${customTo}` : period === 'week' ? 'Periode: 7 Hari Terakhir' : period === 'month' ? 'Periode: 30 Hari Terakhir' : undefined}
             backHref="/dashboard/analyst"
             reports={filteredReports}
             loading={loading}

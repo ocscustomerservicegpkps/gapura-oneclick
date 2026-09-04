@@ -224,7 +224,10 @@ export async function POST(request: NextRequest) {
         description: description || null,
         slug,
         config: config || { dateRange: '7d', autoRefresh: true, theme: 'dark' },
-        is_public: true,
+        // Private unless the creator asks otherwise. Every dashboard was
+        // created public, and a public slug serves its report data to anyone
+        // who has the URL with no session at all.
+        is_public: body.is_public === true,
         folder: folder || null
       })
       .select('id, slug')

@@ -9,7 +9,7 @@ import { persistReportMetadata } from '@/lib/report-persistence';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { bumpSyncVersion } from '@/lib/sync-state';
 import { purgeDashboardSnapshots, purgeExpiredDashboardSnapshots } from '@/lib/dashboard-cache';
-import { linkEvidenceFilesToReport, normalizeEvidenceSubmissionId, validateEvidenceForReport } from '@/lib/evidence-files';
+import { findReportBySubmissionId, linkEvidenceFilesToReport, normalizeEvidenceSubmissionId, validateEvidenceForReport } from '@/lib/evidence-files';
 import { parseReportLimit } from '@/lib/report-page';
 import { queryReportPage, ReportPageQueryError } from '@/lib/server/report-page-query';
 
@@ -150,6 +150,13 @@ export async function POST(request: Request) {
 
         const areaKey = String(area || '').trim().toUpperCase().replace(/\s+AREA$/, '');
         const submissionId = normalizeEvidenceSubmissionId(evidence_submission_id);
+
+        // Idempotency for the offline queue replay — see the public route.
+        const alreadyFiled = await findReportBySubmissionId(submissionId);
+        if (alreadyFiled) {
+            return NextResponse.json({ success: true, report: alreadyFiled, duplicate: true });
+        }
+
         const evidenceValidation = await validateEvidenceForReport({
             evidenceFileIds: evidence_file_ids,
             evidenceUrls: evidence_urls || evidence_url,
@@ -257,7 +264,7 @@ export async function POST(request: Request) {
         }
 
         await Promise.all([
-            persistReportMetadata(newReport, { userId: payload.id }).catch((persistError) => {
+            persistReportMetadata(newReport, { userId: payload.id, markSynced: true }).catch((persistError) => {
                 console.warn('[REPORTS_API] Metadata persistence failed (non-blocking):', persistError);
             }),
             notifyNewRecordEmail(newReport, 'internal').catch((notificationError) => {

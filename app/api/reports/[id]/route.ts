@@ -6,7 +6,7 @@ import { verifySession } from '@/lib/auth-utils';
 import { reportsService } from '@/lib/services/reports-service';
 import { persistReportMetadata } from '@/lib/report-persistence';
 import { notifyReportClosedEmail, notifyStatusChange } from '@/lib/notifications';
-import { linkEvidenceFilesToReport, normalizeEvidenceFileIds } from '@/lib/evidence-files';
+import { isSafeEvidenceUrl, linkEvidenceFilesToReport, normalizeEvidenceFileIds } from '@/lib/evidence-files';
 import { canChangeReportStatus } from '@/lib/constants/report-status';
 import { JOUMPA_SHEET_ID, JOUMPA_SHEET_NAME } from '@/lib/joumpa/mapping';
 import { isJoumpaReportSource } from '@/lib/joumpa/status-update';
@@ -46,9 +46,9 @@ function buildReportIdOrFilter(candidates: string[]): string {
 }
 
 function normalizeUrlList(value: unknown): string[] {
-    if (Array.isArray(value)) return value.filter(Boolean).map(String);
+    if (Array.isArray(value)) return value.filter(Boolean).map(String).filter(isSafeEvidenceUrl);
     if (typeof value === 'string' && value.trim()) {
-        return value.split(/\s*\|\s*|\n+/).map((item) => item.trim()).filter(Boolean);
+        return value.split(/\s*\|\s*|\n+/).map((item) => item.trim()).filter(isSafeEvidenceUrl);
     }
     return [];
 }
@@ -244,7 +244,7 @@ export async function PATCH(
         if (description !== undefined) updates.description = description;
         if (severity !== undefined) updates.severity = severity;
         if (status !== undefined) updates.status = normalizeStatus(status);
-        if (evidence_urls !== undefined) updates.evidence_urls = evidence_urls;
+        if (evidence_urls !== undefined) updates.evidence_urls = normalizeUrlList(evidence_urls);
         if (evidence_file_ids !== undefined) updates.evidence_file_ids = normalizeEvidenceFileIds(evidence_file_ids);
         if (flight_number !== undefined) updates.flight_number = flight_number;
         if (aircraft_reg !== undefined) updates.aircraft_reg = aircraft_reg;
@@ -369,6 +369,27 @@ export async function PATCH(
                             evidence_url: mergedUrls[0] || null,
                             evidence_urls: mergedUrls,
                         };
+                        // This branch writes the DB only — the sheet write
+                        // could not run (updateReport failed to locate the
+                        // row). The row is left dirty (markSynced not set), so
+                        // the sync's outbox pushes it to the sheet later; the
+                        // version bump keeps dashboards fresh in the meantime.
+                        // Persisting also refreshes content_hash — without it
+                        // the next full sync reads the stale hash as
+                        // "unchanged" and skips the row.
+                        await persistReportMetadata(fallbackReport, { userId: payload.id })
+                            .catch((syncErr) => {
+                                console.warn('[REPORTS_PATCH] Fallback sync error:', syncErr);
+                            });
+                        try {
+                            const { bumpSyncVersion } = await import('@/lib/sync-state');
+                            const { purgeDashboardSnapshots, purgeExpiredDashboardSnapshots } = await import('@/lib/dashboard-cache');
+                            const state = await bumpSyncVersion('reports');
+                            await purgeDashboardSnapshots({ maxSyncVersion: Number(state.sync_version) });
+                            await purgeExpiredDashboardSnapshots();
+                        } catch (cacheErr) {
+                            console.warn('[REPORTS_PATCH] Cache invalidation failed (fallback):', cacheErr);
+                        }
                         return NextResponse.json({ success: true, data: fallbackReport });
                     }
                 }
@@ -410,8 +431,12 @@ export async function PATCH(
         }
 
         if (!isJoumpaStatusUpdate) {
+            // updateReport above already wrote these values to the sheet, so
+            // the row is sheet-confirmed — stamp synced_at or the outbox
+            // would push it back as a no-op on every full sync.
             await persistReportMetadata(updatedReport, {
                 userId: updatedReport.user_id || payload.id,
+                markSynced: true,
             }).catch((syncErr) => {
                 console.warn('[Supabase] PATCH sync error:', syncErr);
             });
@@ -504,12 +529,35 @@ export async function DELETE(
             existingReport?.sheet_id,
         ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
 
-        const deleteOrFilter = buildReportIdOrFilter(reportIdCandidates);
-        if (deleteOrFilter) {
-            await supabaseAdmin
-                .from('ground_handling_irregularity_report')
-                .delete()
-                .or(deleteOrFilter);
+        // Cascade in one transaction. Comments, notifications, documents and
+        // evidence all key off the report id in a plain TEXT column with no
+        // foreign key, so deleting only the report row left them behind — and
+        // because a report's id is uuidv5(sheet_id), the deleted id is reused by
+        // whichever report shifts into that sheet position on the next sync,
+        // resurfacing this report's comments and evidence on an unrelated one.
+        const { data: cascade, error: cascadeError } = await supabaseAdmin.rpc(
+            'delete_report_cascade',
+            { p_report_ids: reportIdCandidates }
+        );
+
+        if (cascadeError) {
+            console.error('[REPORTS_DELETE] Cascade delete failed:', cascadeError);
+            return NextResponse.json({ error: 'Gagal menghapus laporan' }, { status: 500 });
+        }
+
+        const removed = (cascade || {}) as Record<string, unknown>;
+        const documentPaths = Array.isArray(removed.document_paths)
+            ? (removed.document_paths as string[])
+            : [];
+        if (documentPaths.length > 0) {
+            // Best effort: the rows are already gone, so a failure here only
+            // strands objects in the bucket — it must not fail the delete.
+            try {
+                const { removeReportDocumentObjects } = await import('@/lib/report-documents-server');
+                await removeReportDocumentObjects(documentPaths);
+            } catch (storageError) {
+                console.warn('[REPORTS_DELETE] Report document cleanup failed:', storageError);
+            }
         }
 
         try {
@@ -522,7 +570,7 @@ export async function DELETE(
             console.warn('[REPORTS_DELETE] Cache invalidation failed:', cacheErr);
         }
 
-        return NextResponse.json({ success: true, deletedFromSheet });
+        return NextResponse.json({ success: true, deletedFromSheet, removed });
     } catch (error) {
         console.error('Error deleting report:', error);
         return NextResponse.json({ error: 'Gagal menghapus laporan' }, { status: 500 });

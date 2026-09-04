@@ -4,7 +4,7 @@ import { reportsService } from '@/lib/services/reports-service';
 import { notifyNewRecordEmail, notifyNewReport } from '@/lib/notifications';
 import { persistReportMetadata } from '@/lib/report-persistence';
 import { checkDbRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
-import { linkEvidenceFilesToReport, normalizeEvidenceSubmissionId, validateEvidenceForReport } from '@/lib/evidence-files';
+import { findReportBySubmissionId, linkEvidenceFilesToReport, normalizeEvidenceSubmissionId, validateEvidenceForReport } from '@/lib/evidence-files';
 import type { Report } from '@/types';
 import { signReportDocumentToken } from '@/lib/report-document-token';
 import { bumpSyncVersion } from '@/lib/sync-state';
@@ -68,6 +68,14 @@ export async function POST(request: Request) {
     } = body;
 
     const submissionId = normalizeEvidenceSubmissionId(evidence_submission_id);
+
+    // Idempotency for the offline queue replay: if this submission already
+    // landed, hand back the existing report instead of filing a duplicate.
+    const alreadyFiled = await findReportBySubmissionId(submissionId);
+    if (alreadyFiled) {
+      return NextResponse.json({ success: true, report: alreadyFiled, duplicate: true });
+    }
+
     const evidenceValidation = await validateEvidenceForReport({
       evidenceFileIds: evidence_file_ids,
       evidenceUrls: evidence_urls || evidence_url,
@@ -153,7 +161,7 @@ export async function POST(request: Request) {
     }
 
     await Promise.all([
-      persistReportMetadata(newReport).catch((persistError) => {
+      persistReportMetadata(newReport, { markSynced: true }).catch((persistError) => {
         console.warn('[Public Report] Metadata persistence failed (non-blocking):', persistError);
       }),
       notifyNewRecordEmail(newReport, 'public').catch((notificationError) => {
@@ -204,10 +212,24 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       message: 'Laporan berhasil dikirim',
-      data: newReport,
+      // Identifiers and confirmation only. Returning the created row echoed the
+      // whole record back to an anonymous submitter — including the columns the
+      // sync and the reviewers own (user_id, reporter_email, the notes fields).
+      // Both callers read nothing but the id from this, and the wizard already
+      // has the content: it renders its own form state.
+      data: {
+        id: newReport.id ?? null,
+        original_id: newReport.original_id ?? null,
+        sheet_id: newReport.sheet_id ?? null,
+        status: newReport.status ?? null,
+        created_at: newReport.created_at ?? null,
+      },
       document_finalization_token: documentFinalizationToken,
     }, { status: 201 });
-  } catch {
+  } catch (error) {
+    // The bare `catch {}` here left unauthenticated submission failures with no
+    // trace at all — the one path with no user to ask what happened.
+    console.error('[Public Report] Submission failed:', error);
     return NextResponse.json({ error: 'Gagal mengirim laporan' }, { status: 500 });
   }
 }

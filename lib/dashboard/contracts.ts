@@ -49,6 +49,5 @@ export interface CompleteDashboardReportsResponse {
   source: 'ground_handling';
   eligibleCount: number;
   returnedCount: number;
-  generatedAt: string;
   completeness: 'complete';
 }

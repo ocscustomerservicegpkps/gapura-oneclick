@@ -1,12 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Download, FileText, FileType2, ImageOff, Loader2, MessageSquare, RotateCcw } from 'lucide-react';
+import { Download, FileText, FileType2, ImageOff, Loader2, MessageSquare, Play, RotateCcw } from 'lucide-react';
 import { AREA_LABELS } from '@/lib/constants/incident-areas';
 import { FormShell, Section } from '@/components/public-report/apple-form-shell';
 import { CommentInput } from '@/components/dashboard/reports/CommentInput';
 import { CloseReportDialog, type CloseReportValues } from '@/components/dashboard/CloseReportDialog';
 import { getEvidencePreviewUrl } from '@/lib/evidence-url';
+import { evidenceKindFromUrl } from '@/lib/evidence-mime';
 import type { Report } from '@/types';
 
 interface Props {
@@ -100,23 +101,38 @@ const toUrlList = (v: unknown): string[] => {
 function EvidenceThumb({ url, index }: { url: string; index: number }) {
   const [failed, setFailed] = useState(false);
   const previewUrl = getEvidencePreviewUrl(url);
+  const kind = evidenceKindFromUrl(url);
+
+  // Videos and documents have no image to show, so the tile becomes a labelled
+  // affordance; the anchor still opens the file itself in a new tab.
+  const body = failed ? (
+    <div className="jm-evidence__fallback">
+      <ImageOff size={22} strokeWidth={1.5} />
+    </div>
+  ) : kind === 'video' ? (
+    <div className="jm-evidence__fallback jm-evidence__fallback--video">
+      <video src={`${previewUrl}#t=0.1`} preload="metadata" muted playsInline />
+      <Play size={22} strokeWidth={1.5} fill="currentColor" />
+    </div>
+  ) : kind === 'document' ? (
+    <div className="jm-evidence__fallback">
+      <FileText size={22} strokeWidth={1.5} />
+    </div>
+  ) : (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={previewUrl}
+      alt={`Evidence ${index + 1}`}
+      loading="lazy"
+      decoding="async"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  );
+
   return (
     <a href={url} target="_blank" rel="noopener noreferrer" className="jm-evidence__item">
-      {failed ? (
-        <div className="jm-evidence__fallback">
-          <ImageOff size={22} strokeWidth={1.5} />
-        </div>
-      ) : (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={previewUrl}
-          alt={`Evidence ${index + 1}`}
-          loading="lazy"
-          decoding="async"
-          referrerPolicy="no-referrer"
-          onError={() => setFailed(true)}
-        />
-      )}
+      {body}
       <span className="jm-evidence__badge">{String(index + 1).padStart(2, '0')}</span>
     </a>
   );

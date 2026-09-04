@@ -32,9 +32,13 @@ export interface PersistedReportPage<TItem> {
   page: ReportPage<TItem>;
 }
 
+// No 'division' variant: division scoping was removed (see below) and nothing
+// produces it. Leaving it in the union left report-page-query with an empty
+// branch that would have handed division users the unfiltered company set the
+// moment anything started returning it. Reintroduce it here and the consumers
+// stop compiling until they scope it, which is the point.
 type ReportPageAccess =
   | { kind: 'company' }
-  | { kind: 'division'; division: string }
   | { kind: 'employee' }
   | { kind: 'manager' }
   | { kind: 'forbidden' };

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAISession, unauthorizedResponse } from '@/lib/ai-route-helpers';
+import { checkDbRateLimit } from '@/lib/security/rate-limit';
 import { mlClient, type RiskEntry } from '@/lib/ml-client';
 import { CaseInsightResponse, type Severity } from '@/lib/schemas/insight';
 
@@ -33,7 +34,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid body' }, { status: 400 });
   }
 
-  const text = String(body.report_text ?? body.report ?? '').trim();
+  // Per-user cap on a paid, per-click model call. The client sends the report
+  // text on every view, so a user flipping through reports drove one inference
+  // each time with nothing between them and the bill.
+  const limit = await checkDbRateLimit(`ai:insight:case:${session.id}`, 30, 60_000);
+  if (!limit.success) {
+    return NextResponse.json(
+      { error: 'Terlalu banyak permintaan analisis. Coba lagi sebentar.' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil((limit.resetAt - Date.now()) / 1000)) } }
+    );
+  }
+
+  // Report narratives are a few paragraphs; anything past this is someone
+  // pasting a document into a field that bills per token.
+  const MAX_REPORT_TEXT = 20_000;
+  const text = String(body.report_text ?? body.report ?? '').trim().slice(0, MAX_REPORT_TEXT);
   if (!text) {
     return NextResponse.json({ error: 'report_text is required' }, { status: 400 });
   }

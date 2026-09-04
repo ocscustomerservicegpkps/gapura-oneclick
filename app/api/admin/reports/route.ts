@@ -6,6 +6,7 @@ import { reportsService } from '@/lib/services/reports-service';
 import { notifyReportClosedEmail, notifyStatusChange } from '@/lib/notifications';
 import { parseReportLimit } from '@/lib/report-page';
 import { queryReportPage, ReportPageQueryError } from '@/lib/server/report-page-query';
+import { isStorableHttpUrl } from '@/lib/security/url-validation';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -156,7 +157,16 @@ export async function PATCH(request: Request) {
         }
 
         if (resolution_evidence_url) {
-            updateData.resolution_evidence_url = resolution_evidence_url;
+            // Stored verbatim before, then rendered as a link — so a
+            // `javascript:` or `data:text/html,…` value became script execution
+            // in whoever opened the report next.
+            if (!isStorableHttpUrl(resolution_evidence_url)) {
+                return NextResponse.json(
+                    { error: 'resolution_evidence_url harus berupa URL http/https yang valid' },
+                    { status: 400 },
+                );
+            }
+            updateData.resolution_evidence_url = String(resolution_evidence_url).trim();
         }
 
         if (requestedAction === 'reopen') {

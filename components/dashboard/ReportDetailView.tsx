@@ -14,6 +14,7 @@ import {
   Link,
   Loader2,
   MessageSquare,
+  Play,
   Plus,
   RotateCcw,
   Save,
@@ -35,6 +36,7 @@ import { BriefingEditorModal } from "@/components/dashboard/BriefingEditorModal"
 import { EvidenceViewModal } from "@/components/dashboard/EvidenceViewModal";
 import { AIInsightCard } from "@/components/dashboard/ai-insight";
 import { canExportBranchData, canEditReport } from "@/lib/permissions";
+import { EVIDENCE_ACCEPT, EVIDENCE_HINT, checkEvidenceFile, evidenceKindFromUrl } from "@/lib/evidence-mime";
 
 const SEVERITY_BADGES: Record<string, { label: string; classes: string }> = {
   'TOP RISK': { label: "TOP RISK", classes: "bg-rose-50 text-rose-600 border border-rose-100" },
@@ -61,6 +63,20 @@ export interface StatusUpdateDetails {
 }
 
 const REMARKS_BY_DIVISIONS = ["OP", "UQ", "OT", "OS", "OCS", "HT", "HC"] as const;
+
+/**
+ * decodeURIComponent throws URIError on a lone `%` — a filename like
+ * "50%_bagasi.jpg" white-screened the whole detail view. The raw name is a
+ * perfectly good fallback.
+ */
+function evidenceFilename(url: string): string {
+  const last = url.split('/').pop() || '';
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
+}
 
 function DataField({
   label,
@@ -170,7 +186,7 @@ export function ReportDetailView({
   const [, setMounted] = useState(false);
 
   const resolveEscalationDivisionLabel = () => {
-    if (pathname.startsWith('/dashboard/eskalasi/op') || pathname.startsWith('/dashboard/op')) return 'Division OP';
+    if (pathname.startsWith('/dashboard/eskalasi/op') || pathname.startsWith('/dashboard/operasional')) return 'Division OP';
     if (pathname.startsWith('/dashboard/eskalasi/os') || pathname.startsWith('/dashboard/ocs') || pathname.startsWith('/dashboard/os')) return 'Unit Service';
     if (pathname.startsWith('/dashboard/eskalasi/ht') || pathname.startsWith('/dashboard/ht')) return 'Division HT';
     return 'Division Escalation';
@@ -294,7 +310,10 @@ export function ReportDetailView({
       const currentEvidence = report.evidence_urls || (report.evidence_url ? [report.evidence_url] : []);
       const uploaded: string[] = [];
       for (const file of evidenceFiles) {
-        const compressed = await compressImage(file);
+        const check = checkEvidenceFile(file);
+        if (!check.ok) throw new Error(check.error);
+        // Only images survive a canvas round-trip — videos and documents are sent as-is.
+        const compressed = check.kind === 'image' ? await compressImage(file) : file;
         const typeTag = lampiranActionType; // e.g. CORRECTIVE or PREVENTIVE
         const uploader = userRole || 'Unknown';
         const cleanUploader = uploader.replace(/[^a-zA-Z0-9]/g, '-');
@@ -304,8 +323,8 @@ export function ReportDetailView({
         fd.append('file', renamedFile);
         const res = await fetch(`/api/reports/${report.id}/evidence`, { method: 'POST', body: fd });
         if (!res.ok) {
-          const msg = await res.text();
-          throw new Error(msg || 'Upload failed');
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error || `Upload failed (${res.status})`);
         }
         const data = await res.json();
         const url = data.url as string;
@@ -319,7 +338,7 @@ export function ReportDetailView({
       onRefresh?.(patchData.data || patchData);
     } catch (error) {
       console.error(error);
-      alert('Failed to upload evidence');
+      alert(error instanceof Error ? error.message : 'Failed to upload evidence');
     } finally { setActionLoading(false); }
   };
 
@@ -702,8 +721,13 @@ export function ReportDetailView({
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                     {allEvidence.map((url, i) => {
                       const isPartnerEvidence = report.partner_evidence_urls?.includes(url);
-                      const isImage = /\.(png|jpg|jpeg|webp|gif|avif)$/i.test(url) || 
-                                     (url.includes('/storage/v1/object/public/evidence/') && !/\.(docx|doc|pdf|xlsx|xls|pptx|ppt)$/i.test(url));
+                      const kind = evidenceKindFromUrl(url);
+                      const isVideo = kind === 'video';
+                      // Legacy evidence objects were stored without an extension; anything
+                      // from the evidence bucket that is not a recognised video/document is
+                      // still assumed to be an image.
+                      const isImage = kind === 'image' ||
+                                     (!kind && url.includes('/storage/v1/object/public/evidence/'));
                       return (
                         <a
                           key={i}
@@ -715,7 +739,28 @@ export function ReportDetailView({
                             isPartnerEvidence ? "border-emerald-200" : "border-slate-100"
                           )}
                         >
-                          {isImage ? (
+                          {isVideo ? (
+                            // Nesting <video controls> inside the tile's <a> would be invalid
+                            // markup and swallow the click, so this is a muted first-frame
+                            // thumbnail — the anchor opens the clip in a new tab.
+                            <div className="relative aspect-video bg-black">
+                              <video
+                                src={`${url}#t=0.1`}
+                                preload="metadata"
+                                muted
+                                playsInline
+                                className="h-full w-full object-cover"
+                              />
+                              <div className="absolute inset-0 flex items-center justify-center">
+                                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-black/55 text-white ring-1 ring-white/40">
+                                  <Play size={16} fill="currentColor" />
+                                </span>
+                              </div>
+                              <span className="absolute bottom-2 left-2 rounded-md bg-black/60 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white">
+                                Video
+                              </span>
+                            </div>
+                          ) : isImage ? (
                             <div className="relative aspect-video bg-slate-50 group">
                               {isSafeLocalImage(url) ? (
                                 <Image
@@ -745,7 +790,7 @@ export function ReportDetailView({
                               {/* Metadata Overlay for Images */}
                               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity p-2 flex flex-col justify-end">
                                 {(() => {
-                                  const filename = decodeURIComponent(url.split('/').pop() || '');
+                                  const filename = evidenceFilename(url);
                                   const metadataMatch = filename.match(/^([A-Z]+)__(.*?)__/);
                                   if (metadataMatch) {
                                     const actionType = metadataMatch[1] === 'CORRECTIVE' ? 'Corrective Action' : 
@@ -767,12 +812,12 @@ export function ReportDetailView({
                               <div className="flex items-center gap-3">
                                 <FileText size={16} className={isPartnerEvidence ? "text-emerald-600 shrink-0" : "text-blue-500 shrink-0"} />
                                 <span className="text-sm text-[var(--text-secondary)] truncate flex-1 font-medium">
-                                  {decodeURIComponent(url.split('/').pop() || '').split('__').pop() || 'Document'}
+                                  {evidenceFilename(url).split('__').pop() || 'Document'}
                                 </span>
                               </div>
                               
                               {(() => {
-                                const filename = decodeURIComponent(url.split('/').pop() || '');
+                                const filename = evidenceFilename(url);
                                 const metadataMatch = filename.match(/^([A-Z]+)__(.*?)__/);
                                 if (metadataMatch) {
                                   const actionType = metadataMatch[1] === 'CORRECTIVE' ? 'Corrective Action' : 
@@ -845,7 +890,7 @@ export function ReportDetailView({
                         <div className="flex flex-col sm:flex-row gap-2 items-center">
                           <input
                             type="file"
-                            accept="image/*"
+                            accept={EVIDENCE_ACCEPT}
                             multiple
                             onChange={(e) => setEvidenceFiles(Array.from(e.target.files || []))}
                             className="flex-1 text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)] outline-none"
@@ -856,9 +901,10 @@ export function ReportDetailView({
                             className="px-4 py-2 bg-[var(--brand-primary)] text-white rounded-lg text-xs font-semibold hover:brightness-110 transition-all flex items-center justify-center gap-1.5 disabled:opacity-60 whitespace-nowrap"
                           >
                             {actionLoading ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-                            Upload Photo
+                            Upload File
                           </button>
                         </div>
+                        <p className="text-[11px] text-slate-500">{EVIDENCE_HINT}</p>
                       </>
                     )}
                   </div>

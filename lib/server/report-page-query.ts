@@ -155,9 +155,6 @@ export async function queryReportPage(
       : query.eq('id', '__no_match__');
   } else if (access.kind === 'manager') {
     query = query.or(buildColumnValueOrFilter(REPORT_STATION_FIELDS, managerStationValues));
-  } else if (access.kind === 'division') {
-    // This access kind is no longer produced by resolveReportPageAccess; if it
-    // ever is, division users see the full company set, like the dashboards.
   }
 
   const filters = options.filters;

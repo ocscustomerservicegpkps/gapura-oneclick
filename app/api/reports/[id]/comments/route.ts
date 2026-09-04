@@ -5,6 +5,7 @@ import { cookies } from 'next/headers';
 import { verifySession } from '@/lib/auth-utils';
 import { UserRole } from '@/types';
 import { notifyReportCommentEmail, type CommentRecipient } from '@/lib/notifications';
+import { quoteForPostgrestFilter } from '@/lib/security/postgrest';
 
 interface RouteParams {
     params: Promise<{ id: string }>;
@@ -17,7 +18,7 @@ async function resolveReportRef(
     reportId: string
 ): Promise<{ stableUuid: string; sheetId: string | null; source: 'ground_handling_irregularity_report' | 'joumpa_reports_sync' } | null> {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reportId);
-    const safe = `"${reportId.replace(/"/g, '""')}"`;
+    const safe = quoteForPostgrestFilter(reportId);
 
     const ghFilter = isUuid
         ? `id.eq.${safe},original_id.eq.${safe},sheet_id.eq.${safe}`
@@ -50,22 +51,28 @@ const GLOBAL_COMMENT_ROLES: UserRole[] = [
     'DIVISI_OCS', 'DIVISI_OS', 'DIVISI_OP', 'DIVISI_OT', 'DIVISI_UQ', 'DIVISI_HT',
 ];
 
-async function canAccessReportComments(reportId: string, userId: string, role: UserRole, stationId?: string): Promise<boolean> {
+/**
+ * `reportUuid` must be the resolved `stableUuid`, never the raw route
+ * parameter.
+ *
+ * Both branch-tier arms used to short-circuit to `true` for any id containing
+ * '!' — which is every sheet id ("NON CARGO!row_123"). The lookups below only
+ * work against the uuid, so addressing a report by its sheet id skipped the
+ * station and ownership checks entirely and let any branch user read and post
+ * on any report in the company. Resolving the ref first removes the need for
+ * the short-circuit.
+ */
+async function canAccessReportComments(reportUuid: string, userId: string, role: UserRole, stationId?: string): Promise<boolean> {
 
     if (GLOBAL_COMMENT_ROLES.includes(role)) {
         return true;
     }
 
     if (role === 'MANAGER_CABANG') {
-
-        if (reportId.includes('!')) {
-            return true;
-        }
-
         const { data: report } = await supabaseAdmin
             .from('ground_handling_irregularity_report')
             .select('station_id')
-            .eq('id', reportId)
+            .eq('id', reportUuid)
             .single();
 
         if (!report) return false;
@@ -73,14 +80,10 @@ async function canAccessReportComments(reportId: string, userId: string, role: U
     }
 
     if (role === 'STAFF_CABANG') {
-        if (reportId.includes('!')) {
-            return true;
-        }
-
         const { data: report, error } = await supabaseAdmin
             .from('ground_handling_irregularity_report')
             .select('user_id')
-            .eq('id', reportId)
+            .eq('id', reportUuid)
             .single();
 
         if (error || !report) return false;
@@ -106,17 +109,21 @@ export async function GET(request: Request, { params }: RouteParams) {
             return NextResponse.json({ error: 'Invalid session' }, { status: 401 });
         }
 
-        if (!reportId.includes('!')) {
-            const hasAccess = await canAccessReportComments(reportId, payload.id as string, payload.role as UserRole, payload.station_id as string);
-            if (!hasAccess) {
-                return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-            }
-        }
-
         // DB-only ref resolution — never touches Google Sheets, so reading
         // comments is instant (getReportById could stall ~5s on a live fetch).
+        // Resolved before the access check so the check always runs against the
+        // report's uuid, whichever identifier the caller addressed it by.
         const ref = await resolveReportRef(reportId);
-        const commentIds = [reportId, ref?.stableUuid, ref?.sheetId].filter((val): val is string => !!val);
+        if (!ref) {
+            return NextResponse.json({ error: 'Report not found' }, { status: 404 });
+        }
+
+        const hasAccess = await canAccessReportComments(ref.stableUuid, payload.id as string, payload.role as UserRole, payload.station_id as string);
+        if (!hasAccess) {
+            return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+        }
+
+        const commentIds = [reportId, ref.stableUuid, ref.sheetId].filter((val): val is string => !!val);
         const { data, error } = await supabaseAdmin
             .from('report_comments')
             .select(`
@@ -171,28 +178,19 @@ export async function POST(request: Request, { params }: RouteParams) {
             return NextResponse.json({ error: 'Content or attachments required' }, { status: 400 });
         }
 
-        let hasAccess = false;
-
-        if (GLOBAL_COMMENT_ROLES.includes(payload.role as UserRole)) {
-            hasAccess = true;
-        } else {
-
-            if (reportId.includes('!')) {
-
-                hasAccess = (payload.role === 'MANAGER_CABANG' || payload.role === 'STAFF_CABANG');
-            } else {
-                hasAccess = await canAccessReportComments(reportId, payload.id as string, payload.role as UserRole, payload.station_id as string);
-            }
-        }
-
-        if (!hasAccess) {
-            return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-        }
-
+        // Same ordering as GET: resolve first, then authorise against the
+        // report's uuid. Addressing a report by its sheet id used to grant any
+        // MANAGER_CABANG or STAFF_CABANG the right to post on it, whatever
+        // station it belonged to and whoever filed it.
         const ref = await resolveReportRef(reportId);
 
         if (!ref) {
             return NextResponse.json({ error: 'Report not found' }, { status: 404 });
+        }
+
+        const hasAccess = await canAccessReportComments(ref.stableUuid, payload.id as string, payload.role as UserRole, payload.station_id as string);
+        if (!hasAccess) {
+            return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
         }
 
         const stableUuid = ref.stableUuid;

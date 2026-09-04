@@ -14,6 +14,7 @@
     "debug:sheets": "node scripts/debug-sheets.mjs",
     "backfill:reporter-email": "node scripts/backfill-reporter-email.mjs",
     "sync:verify": "node scripts/verify-no-duplicates.mjs",
+    "verify:dates": "TZ=UTC npx tsx --conditions=react-server scripts/verify-wib-dates.mts && TZ=Asia/Jakarta npx tsx --conditions=react-server scripts/verify-wib-dates.mts",
     "sync:scheduler": "node scripts/sync-scheduler.mjs",
     "sync:scheduler:dry": "DRY_RUN=1 node scripts/sync-scheduler.mjs",
     "sync:joumpa": "node scripts/sync-joumpa-scheduler.mjs",

@@ -53,6 +53,15 @@ interface OfflineQueueItem {
   error: string | null;
 
   responseData?: Record<string, unknown> | null;
+
+  /**
+   * Attachments already accepted by the server, keyed by attachment id.
+   * Replay is a retry loop: without this, every retry re-uploaded every
+   * attachment, minting a fresh Google Drive file and evidence_files row each
+   * time — so a report whose POST failed once arrived with its evidence
+   * duplicated, and the abandoned Drive files had nothing pointing at them.
+   */
+  uploadedAttachments?: Record<string, { url: string; evidenceFileId?: string }>;
 }
 
 interface OfflineQueueSummary {
@@ -205,8 +214,23 @@ async function listOfflineQueueItems() {
   }
 }
 
-export async function getOfflineQueueSummary(): Promise<OfflineQueueSummary> {
-  const items = await listOfflineQueueItems();
+/**
+ * Items belonging to `scope`, or all of them when no scope is given.
+ *
+ * Every item records the auth scope it was queued under, but nothing read it
+ * back — so on a shared device the queue was effectively global: whoever
+ * happened to be signed in next counted, and replayed, reports queued by the
+ * previous user, under their own session.
+ *
+ * The service worker has no session to scope by (no localStorage), so its
+ * background-sync path still flushes the whole device queue.
+ */
+function itemsInScope(items: OfflineQueueItem[], scope?: string): OfflineQueueItem[] {
+  return scope === undefined ? items : items.filter((item) => item.scope === scope);
+}
+
+export async function getOfflineQueueSummary(scope?: string): Promise<OfflineQueueSummary> {
+  const items = itemsInScope(await listOfflineQueueItems(), scope);
   return items.reduce<OfflineQueueSummary>(
     (summary, item) => {
       summary[item.status] += 1;
@@ -303,7 +327,16 @@ async function replayOfflineQueueItem(item: OfflineQueueItem) {
     ? [...payload.evidence_file_ids].map(String)
     : [];
 
+  const alreadyUploaded = item.uploadedAttachments || {};
+
   for (const attachment of item.attachments) {
+    const done = alreadyUploaded[attachment.id];
+    if (done) {
+      uploadedUrls.push(done.url);
+      if (done.evidenceFileId) uploadedFileIds.push(done.evidenceFileId);
+      continue;
+    }
+
     const formData = new FormData();
     formData.append("file", attachment.blob, attachment.name);
     formData.append("evidence_submission_id", evidenceSubmissionId);
@@ -343,10 +376,18 @@ async function replayOfflineQueueItem(item: OfflineQueueItem) {
       throw new Error("Upload evidence offline gagal: URL tidak ditemukan.");
     }
 
+    const evidenceFileId = uploadData.evidence_file_id || uploadData.evidenceFileId;
     uploadedUrls.push(uploadData.url);
-    if (uploadData.evidence_file_id || uploadData.evidenceFileId) {
-      uploadedFileIds.push(String(uploadData.evidence_file_id || uploadData.evidenceFileId));
-    }
+    if (evidenceFileId) uploadedFileIds.push(String(evidenceFileId));
+
+    // Persisted before the report POST, so a failure there does not cost the
+    // upload again on the next attempt.
+    alreadyUploaded[attachment.id] = {
+      url: String(uploadData.url),
+      ...(evidenceFileId ? { evidenceFileId: String(evidenceFileId) } : {}),
+    };
+    item.uploadedAttachments = alreadyUploaded;
+    await saveOfflineQueueItem(item);
   }
 
   if (uploadedUrls.length > 0) {
@@ -374,8 +415,8 @@ async function replayOfflineQueueItem(item: OfflineQueueItem) {
   return { payload, responseData };
 }
 
-export async function processOfflineQueue() {
-  const items = await listOfflineQueueItems();
+export async function processOfflineQueue(scope?: string) {
+  const items = itemsInScope(await listOfflineQueueItems(), scope);
   const pendingItems = items.filter(
     (item) => item.status === "queued" || item.status === "failed"
   );

@@ -4,6 +4,7 @@ import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import { google } from 'googleapis';
 import crypto from 'crypto';
+import { buildRowContentHash, checkOrphanDeletion } from '../lib/report-sync-guard.ts';
 
 const DRY_RUN = Boolean(process.env.DRY_RUN);
 const SHEET_ID = process.env.JOUMPA_SHEET_ID;
@@ -12,6 +13,7 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GOOGLE_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_KEY = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const PAGE_SIZE = 1000;
 const UPSERT_BATCH = 100;
 const DELETE_BATCH = 500;
 
@@ -312,7 +314,26 @@ function parseRow(raw, headers, colMap, rowIndex) {
   };
 
   row.source_fingerprint = buildFingerprint(row);
+  // Not a column: the sheet's Status column is optional, and normalizeStatus
+  // defaults to 'OPEN'. Without this, every run resets the app-side workflow
+  // status on a sheet that has no Status column. Stripped in toPayload.
+  Object.defineProperty(row, SHEET_STATUS_MARK, { value: Boolean(get('status')), enumerable: false });
   return row;
+}
+
+/** Non-enumerable flag parseRow leaves on a row; never reaches the wire. */
+const SHEET_STATUS_MARK = Symbol('hasSheetStatus');
+
+/**
+ * Final row as it will be written, plus the hash of exactly that payload.
+ * `status` is only the sheet's to set when the sheet actually has the column —
+ * otherwise the stored workflow status is carried forward. Hashing after that
+ * substitution is what makes the unchanged-row skip in upsertRows correct.
+ */
+function toPayload(row, existing) {
+  const payload = row[SHEET_STATUS_MARK] ? { ...row } : { ...row, status: existing?.status ?? row.status };
+  payload.content_hash = buildRowContentHash(payload);
+  return payload;
 }
 
 async function fetchSheetRows() {
@@ -325,45 +346,101 @@ async function fetchSheetRows() {
   if (values.length === 0) return [];
   const headers = (values[0] || []).map((header) => clean(header));
   const colMap = buildColumnMap(headers);
+  if (colMap.status === undefined) {
+    log('WARN', `Sheet "${SHEET_NAME}" has no Status column — keeping each row's stored status`);
+  }
+  // The row's own position is captured before the blank filter, not after.
+  // parseRow turns its index into `rowNumber` and from there into `sheet_id`,
+  // so taking the post-filter index meant one blank line anywhere in the sheet
+  // renumbered every row below it — the sync then read the whole tail as
+  // "moved", relinking children and orphaning rows that had not changed at all.
   return values
     .slice(1)
-    .filter((row) => row.some((cell) => clean(cell)))
-    .map((row, idx) => parseRow(row, headers, colMap, idx));
+    .map((row, idx) => ({ row, idx }))
+    .filter(({ row }) => row.some((cell) => clean(cell)))
+    .map(({ row, idx }) => parseRow(row, headers, colMap, idx));
 }
 
-async function upsertRows(rows) {
-  if (DRY_RUN) {
-    log('INFO', `[DRY RUN] Would upsert ${rows.length} Joumpa rows`);
-    return 0;
+// Paginated: PostgREST caps an unbounded select at 1000 rows, and this feeds
+// the orphan sweep — so on a table past that cap every row beyond it would be
+// absent from `stored`, read as missing from the sheet, and deleted. The ratio
+// guard would catch a big enough overshoot, but only after the fact.
+async function fetchStoredRows() {
+  const rows = [];
+  let offset = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from('joumpa_reports_sync')
+      .select('id, sheet_id, status, content_hash')
+      .order('sheet_id', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) throw new Error(`Could not read joumpa_reports_sync: ${error.message}`);
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
   }
+  return rows;
+}
+
+async function upsertRows(rows, stored) {
+  const storedBySheetId = new Map(stored.map((row) => [row.sheet_id, row]));
+
+  // Only rows whose written payload actually differs. Without this the sync
+  // rewrote every row every run, overwriting any app edit made since the last
+  // run with the sheet snapshot the run happened to be holding.
+  const changed = [];
+  for (const row of rows) {
+    const existing = storedBySheetId.get(row.sheet_id);
+    const payload = toPayload(row, existing);
+    if (existing?.content_hash && existing.content_hash === payload.content_hash) continue;
+    changed.push(payload);
+  }
+
+  log('INFO', `Joumpa: ${changed.length}/${rows.length} rows changed`);
+  if (changed.length === 0) return { errors: 0, written: 0 };
+  if (DRY_RUN) {
+    log('INFO', `[DRY RUN] Would upsert ${changed.length} Joumpa rows`);
+    return { errors: 0, written: 0 };
+  }
+
   let errors = 0;
-  for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-    const batch = rows.slice(i, i + UPSERT_BATCH);
+  let written = 0;
+  for (let i = 0; i < changed.length; i += UPSERT_BATCH) {
+    const batch = changed.slice(i, i + UPSERT_BATCH);
     const { error } = await supabase
       .from('joumpa_reports_sync')
       .upsert(batch, { onConflict: 'sheet_id', ignoreDuplicates: false });
     if (error) {
       errors += batch.length;
       log('ERROR', `Joumpa upsert failed: ${error.message}`);
+    } else {
+      written += batch.length;
     }
   }
-  return errors;
+  return { errors, written };
 }
 
-async function deleteOrphans(rows) {
+async function deleteOrphans(rows, stored) {
   const currentSheetIds = new Set(rows.map((row) => row.sheet_id));
-  const { data, error } = await supabase
-    .from('joumpa_reports_sync')
-    .select('id, sheet_id');
-  if (error) {
-    log('WARN', `Could not fetch Joumpa rows for orphan cleanup: ${error.message}`);
-    return 0;
+  const orphans = stored.filter((row) => !currentSheetIds.has(row.sheet_id));
+
+  const verdict = checkOrphanDeletion({
+    scope: SHEET_NAME,
+    parsedRows: rows.length,
+    storedRows: stored.length,
+    orphanRows: orphans.length,
+  });
+  if (!verdict.allowed) {
+    log('ERROR', `Orphan guard BLOCKED ${verdict.reason}`);
+    return { deleted: 0, blocked: orphans.length };
   }
-  const orphans = (data || []).filter((row) => !currentSheetIds.has(row.sheet_id));
+  if (orphans.length === 0) return { deleted: 0, blocked: 0 };
   if (DRY_RUN) {
     log('INFO', `[DRY RUN] Would delete ${orphans.length} Joumpa orphan rows`);
-    return 0;
+    return { deleted: 0, blocked: 0 };
   }
+
   let deleted = 0;
   for (let i = 0; i < orphans.length; i += DELETE_BATCH) {
     const ids = orphans.slice(i, i + DELETE_BATCH).map((row) => row.id);
@@ -378,7 +455,7 @@ async function deleteOrphans(rows) {
       deleted += removed?.length || 0;
     }
   }
-  return deleted;
+  return { deleted, blocked: 0 };
 }
 
 async function verify(rows) {
@@ -395,16 +472,41 @@ async function verify(rows) {
 async function main() {
   const started = Date.now();
   const rows = await fetchSheetRows();
-  const errors = await upsertRows(rows);
-  const deleted = await deleteOrphans(rows);
+
+  // An empty read is indistinguishable from "every report was deleted", and the
+  // orphan sweep below would act on the second reading. A sheet that returns
+  // nothing is a failure to read it, not an instruction to empty the table.
+  if (rows.length === 0) {
+    log('ERROR', `Joumpa sheet "${SHEET_NAME}" returned 0 data rows. Aborting without writing or deleting.`);
+    process.exit(1);
+  }
+
+  const stored = await fetchStoredRows();
+  const { errors, written } = await upsertRows(rows, stored);
+
+  // Deletion is the only destructive step, and it runs last for a reason: if
+  // the writes before it did not all land, the table is in a state nobody has
+  // verified, and "not present in the sheet" is no longer a safe reading. The
+  // orphans are still reported so the next run can act on them once the writes
+  // succeed.
+  let deleted = 0;
+  let blocked = 0;
+  if (errors > 0) {
+    log('ERROR', `Skipping orphan deletion: ${errors} row(s) failed to upsert.`);
+    blocked = 1;
+  } else {
+    ({ deleted, blocked } = await deleteOrphans(rows, stored));
+  }
   await verify(rows);
   log('INFO', 'Joumpa sync complete', {
     rows: rows.length,
+    written,
     errors,
     deleted,
+    blocked,
     durationMs: Date.now() - started,
   });
-  if (errors > 0) process.exitCode = 1;
+  if (errors > 0 || blocked > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

@@ -3,6 +3,7 @@ import { requireAISession, unauthorizedResponse, aiUnavailableResponse } from '@
 import { callOpenRouterAI } from '@/lib/ai/openrouter';
 import { reportsService } from '@/lib/services/reports-service';
 import { canViewReport } from '@/lib/report-access';
+import { checkDbRateLimit } from '@/lib/security/rate-limit';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -21,6 +22,16 @@ export async function POST(req: NextRequest) {
   try {
     const session = await requireAISession();
     if (!session) return unauthorizedResponse();
+
+    // One fresh model call per click with no cache and no ceiling — holding the
+    // button down was a paid loop.
+    const limit = await checkDbRateLimit(`ai:recommendation:${session.id}`, 20, 60_000);
+    if (!limit.success) {
+      return NextResponse.json(
+        { error: 'Terlalu banyak permintaan rekomendasi. Coba lagi sebentar.' },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil((limit.resetAt - Date.now()) / 1000)) } }
+      );
+    }
 
     const { reportId } = await req.json().catch(() => ({ reportId: '' }));
     if (!reportId) return NextResponse.json({ error: 'reportId required' }, { status: 400 });

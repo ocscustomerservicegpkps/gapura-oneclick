@@ -9,6 +9,27 @@ import {
 } from '@/lib/services/reports-service';
 import { applyReportsRbacFilter } from '@/lib/reports-rbac';
 
+// Columns the public /embed/* chart components request (the union of their
+// CORE_FIELDS constants). Anonymous callers may select exactly this set and
+// nothing else — the remaining REPORT_SYNC_FIELDS are reporter identity /
+// internal columns (reporter_email, user_id, evidence_file_ids, ...) and
+// require a session plus the RBAC filter below.
+// Chart dimensions only. This endpoint answers unauthenticated requests for the
+// public /embed/* dashboards and is CDN-cached, so anything listed here is
+// effectively published: one crawler walking it dumps that column for the whole
+// corpus. Narrative columns (root cause, action taken, KPS remarks) describe
+// incidents in free text and evidence_url(s) are live Google Drive links — no
+// chart needs either, and both were readable by anyone with the URL.
+const PUBLIC_ANALYTICS_FIELDS = [
+  'id', 'date_of_event', 'created_at', 'hub', 'branch', 'reporting_branch',
+  'station_code', 'area', 'terminal_area_category', 'apron_area_category',
+  'general_category', 'airlines', 'airline', 'main_category', 'category',
+  'irregularity_complain_category',
+  'source_sheet', 'incident_date', 'station_id',
+] as const;
+
+const PUBLIC_ANALYTICS_FIELD_SET = new Set<string>(PUBLIC_ANALYTICS_FIELDS);
+
 export async function GET(request: NextRequest) {
   try {
     const cookieStore = await cookies();
@@ -22,7 +43,10 @@ export async function GET(request: NextRequest) {
     if (token && !session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { searchParams } = new URL(request.url);
-    const refresh = searchParams.get('refresh') === 'true';
+    // `refresh=true` bypasses the 5-minute server cache and re-reads the whole
+    // corpus. Honouring it for anonymous callers meant anyone with the public
+    // embed URL could force that work on every request.
+    const refresh = searchParams.get('refresh') === 'true' && Boolean(session);
 
     const filters: ReportQueryFilters = {
       dateFrom: searchParams.get('dateFrom') || undefined,
@@ -50,11 +74,25 @@ export async function GET(request: NextRequest) {
     const sourceParam = searchParams.get('source');
     const source: 'sheets' | 'sync' = sourceParam === 'sheets' ? 'sheets' : 'sync';
 
+    const isAnonymous = !session;
+
+    // Anonymous viewers (public /embed/* dashboards) may only select the
+    // public chart columns above — fail closed on anything else instead of
+    // returning reporter identity / internal fields.
+    if (isAnonymous && parsedFields && !parsedFields.fields.every((field) => PUBLIC_ANALYTICS_FIELD_SET.has(field))) {
+      return NextResponse.json(
+        { error: 'Forbidden: requested fields are not available without a session' },
+        { status: 403 }
+      );
+    }
+
     const allReports = await reportsService.getReports({
       refresh,
       filters,
-      fields: parsedFields?.fields,
-      projection: parsedFields ? undefined : 'list',
+      // Anonymous: force the public projection (the default `list` projection
+      // includes reporter_name). Authenticated callers keep today's behavior.
+      fields: parsedFields?.fields ?? (isAnonymous ? [...PUBLIC_ANALYTICS_FIELDS] : undefined),
+      projection: parsedFields || isAnonymous ? undefined : 'list',
       source,
     });
 
@@ -80,17 +118,21 @@ export async function GET(request: NextRequest) {
             // response across chart re-mounts / quick re-navigation (server already
             // caches the row set 5 min, so 30s browser reuse is strictly tighter).
             'Cache-Control': 'private, max-age=30, stale-while-revalidate=120',
+            // The body depends on the session cookie: without this, a cache that
+            // keyed on URL alone could hand one user's filtered set to another,
+            // or the public projection to a signed-in caller.
+            'Vary': 'Cookie',
           }
         : {
             'Cache-Control': 'public, s-maxage=180, stale-while-revalidate=300',
+            'Vary': 'Cookie',
           }
     });
 
   } catch (err) {
     console.error('Analytics API error:', err);
-    return NextResponse.json({ 
-      error: 'Failed to fetch reports',
-      details: err instanceof Error ? err.message : 'Unknown error'
-    }, { status: 500 });
+    // The upstream message can name tables, columns and connection details, and
+    // this endpoint answers anonymous callers.
+    return NextResponse.json({ error: 'Failed to fetch reports' }, { status: 500 });
   }
 }

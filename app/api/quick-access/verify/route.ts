@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { verifyPassword } from '@/lib/auth-utils';
-import { checkRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
+import { checkDbRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
 
 /**
  * Verify a per-tile password (bcrypt, stored in quick_access_tiles.password_hash).
@@ -10,7 +10,7 @@ import { checkRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limi
 export async function POST(request: Request) {
     try {
         const clientIp = getClientIpFromRequest(request);
-        const rateLimit = checkRateLimit(`qa-verify:${clientIp}`, 5, 60_000);
+        const rateLimit = await checkDbRateLimit(`qa-verify:${clientIp}`, 5, 60_000);
         if (!rateLimit.success) {
             return NextResponse.json({ error: 'Terlalu banyak percobaan. Coba lagi dalam 1 menit.' }, { status: 429 });
         }

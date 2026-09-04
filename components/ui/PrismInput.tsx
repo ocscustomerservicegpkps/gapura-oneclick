@@ -29,14 +29,33 @@ const PrismInput = forwardRef<HTMLInputElement, PrismInputProps>(
             size = 'md',
             className,
             id,
+            // Pulled out of `props` so they can be composed rather than
+            // replaced: `{...props}` is spread before the handlers below, so a
+            // consumer passing onFocus/onBlur used to overwrite the internal
+            // ones outright and the floating label stopped working entirely.
+            onFocus,
+            onBlur,
+            onChange,
+            value,
+            defaultValue,
             ...props
         },
         ref
     ) => {
         const [isFocused, setIsFocused] = useState(false);
+        // Mirrors what the user has typed when the input is uncontrolled;
+        // without it the label never floats for an uncontrolled field.
+        const [uncontrolledValue, setUncontrolledValue] = useState(
+            defaultValue === undefined || defaultValue === null ? '' : String(defaultValue)
+        );
         const generatedId = useId();
         const inputId = id || generatedId;
-        const hasValue = Boolean(props.value || props.defaultValue);
+
+        // `Boolean(value)` treated 0 and '' as empty, so a numeric field showing
+        // 0 had its label sitting on top of the value.
+        const isControlled = value !== undefined;
+        const currentValue = isControlled ? value : uncontrolledValue;
+        const hasValue = currentValue !== undefined && currentValue !== null && String(currentValue) !== '';
         const isLabelFloating = isFocused || hasValue;
 
         return (
@@ -52,15 +71,22 @@ const PrismInput = forwardRef<HTMLInputElement, PrismInputProps>(
 
                     {}
                     <input
+                        {...props}
                         ref={ref}
                         id={inputId}
+                        value={value}
+                        defaultValue={defaultValue}
                         onFocus={(e) => {
                             setIsFocused(true);
-                            props.onFocus?.(e);
+                            onFocus?.(e);
                         }}
                         onBlur={(e) => {
                             setIsFocused(false);
-                            props.onBlur?.(e);
+                            onBlur?.(e);
+                        }}
+                        onChange={(e) => {
+                            if (!isControlled) setUncontrolledValue(e.target.value);
+                            onChange?.(e);
                         }}
                         className={cn(
 
@@ -85,7 +111,6 @@ const PrismInput = forwardRef<HTMLInputElement, PrismInputProps>(
                             'focus:outline-none',
                             className
                         )}
-                        {...props}
                     />
 
                     {}

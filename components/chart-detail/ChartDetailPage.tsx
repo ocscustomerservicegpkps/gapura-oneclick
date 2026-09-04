@@ -19,6 +19,7 @@ import { ViewMode, Normalization } from './GlobalControlBar';
 import { generateAnalyticalCharts, fetchAnalyticalChartData } from '@/lib/chart-detail-generator';
 import type { AnalyticalChart } from '@/lib/chart-detail-generator';
 import { MapPin, Plane, Layers, Crosshair, Target } from 'lucide-react';
+import { escapeSpreadsheetCell } from '@/lib/security/sanitize';
 
 const InvestigativeTable = dynamic(
   () => import('./InvestigativeTable').then((module) => module.InvestigativeTable),
@@ -165,15 +166,22 @@ export default function ChartDetailPage({ isPublic = false }: { isPublic?: boole
         fetchTileData(data.tile, EXPORT_ROW_LIMIT),
         import('file-saver'),
       ]);
-      const headers = exportData.columns.join(',');
+      // CSV quoting alone does not stop a spreadsheet executing the cell: a
+      // value like `=IMPORTDATA("https://…")` is quoted happily and still runs
+      // on open. Report text comes from the public form, so it goes through the
+      // same formula guard the Sheets writer uses — headers included, since
+      // column names are user-defined in the dashboard builder.
+      const toCsvCell = (value: unknown) => {
+        const guarded = escapeSpreadsheetCell(value);
+        if (typeof guarded !== 'string') return guarded;
+        return /[",\n\r]/.test(guarded)
+          ? '"' + guarded.replaceAll('"', '""') + '"'
+          : guarded;
+      };
+
+      const headers = exportData.columns.map(toCsvCell).join(',');
       const rows = exportData.rows.map((row) =>
-        exportData.columns.map((column) => {
-          const cell = row[column];
-          if (typeof cell !== 'string') return cell;
-          return /[",\n]/.test(cell)
-            ? '"' + cell.replaceAll('"', '""') + '"'
-            : cell;
-        }).join(',')
+        exportData.columns.map((column) => toCsvCell(row[column])).join(',')
       ).join('\n');
 
       const csvContent = headers + '\n' + rows;

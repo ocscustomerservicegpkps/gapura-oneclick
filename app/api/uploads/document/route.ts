@@ -31,7 +31,10 @@ export async function POST(request: Request) {
     ];
     const validExtensions = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'];
     const extension = (file.name.split('.').pop() || '').toLowerCase();
-    if (!validTypes.includes(file.type) && !validExtensions.includes(extension)) {
+    // Both, not either. `!type && !ext` let a file through on one matching
+    // half, so `payload.exe` declared as application/pdf passed — and the
+    // stored object then took its extension from the filename below.
+    if (!validTypes.includes(file.type) || !validExtensions.includes(extension)) {
       return NextResponse.json({ error: 'Only PDF, Word, Excel, and PowerPoint files are allowed' }, { status: 400 });
     }
 
@@ -44,7 +47,9 @@ export async function POST(request: Request) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    const ext = extension || 'tmp';
+    // Guaranteed to be on validExtensions by the check above, so the stored
+    // object can never carry an extension the allowlist does not name.
+    const ext = extension;
     const rawBaseName = file.name.replace(/\.[^.]+$/, '') || 'document';
     const safeBaseName = rawBaseName.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 90);
     const fileName = `${Date.now()}-${safeBaseName}.${ext}`;

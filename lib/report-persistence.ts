@@ -3,6 +3,7 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { buildReportFingerprint, resolveReportCategory } from '@/lib/report-fingerprint';
+import { buildRowContentHash } from '@/lib/report-sync-guard';
 import type { Report } from '@/types';
 import { v5 as uuidv5 } from 'uuid';
 
@@ -56,7 +57,15 @@ function resolveReportSourceFingerprint(report: Partial<Report>): string {
     return String(report.source_fingerprint || buildReportFingerprint(report));
 }
 
-export function buildReportsSyncRow(report: Partial<Report>): Record<string, unknown> {
+// buildRowContentHash lives in report-sync-guard so the standalone sync
+// schedulers (plain .mjs, no next/server-only runtime) can compute the same
+// hash this module writes. Re-exported here for existing importers.
+export { buildRowContentHash };
+
+export function buildReportsSyncRow(
+    report: Partial<Report>,
+    options: { markSynced?: boolean } = {}
+): Record<string, unknown> {
     const sheetId = resolveReportSheetId(report);
     if (!sheetId) {
         throw new Error('Cannot build reports_sync row without sheet_id/original_id');
@@ -187,7 +196,12 @@ export function buildReportsSyncRow(report: Partial<Report>): Record<string, unk
         primary_tag: report.primary_tag || null,
         sub_category_note: report.sub_category_note || null,
 
-        synced_at: new Date().toISOString(),
+        // synced_at means "this row's content is confirmed on the sheet". Only
+        // writers that actually pushed the values to Google Sheets may stamp it
+        // (markSynced) — anyone else leaves it untouched, so the row stays
+        // dirty and the sync's push-back retries the sheet write. Stamping it
+        // unconditionally here is what silently killed that safety net.
+        ...(options.markSynced ? { synced_at: new Date().toISOString() } : {}),
         sync_version: 1,
     };
 }
@@ -211,9 +225,9 @@ async function upsertReportsSyncRow(payload: Record<string, unknown>) {
 
 export async function persistReportMetadata(
     report: Partial<Report>,
-    options?: { userId?: string | null }
+    options?: { userId?: string | null; markSynced?: boolean }
 ) {
-    const syncRow = buildReportsSyncRow(report);
+    const syncRow = buildReportsSyncRow(report, options);
     // report.user_id comes straight off the sheet's free-text "User ID"
     // column and is usually not a valid UUID, so buildReportsSyncRow's own
     // sanitizeUserId(report.user_id) leaves it null most of the time. Callers
@@ -224,6 +238,11 @@ export async function persistReportMetadata(
         const fallbackUserId = sanitizeUserId(options.userId);
         if (fallbackUserId) syncRow.user_id = fallbackUserId;
     }
+
+    // Must be stamped on every write path, not just the full sync. A row written
+    // here without refreshing its hash would keep the previous one, and the next
+    // full sync would read that stale hash as "unchanged" and skip the row.
+    syncRow.content_hash = buildRowContentHash(syncRow);
 
     await upsertReportsSyncRow(syncRow);
 }

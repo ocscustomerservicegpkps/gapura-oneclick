@@ -15,7 +15,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Sparkles } from 'lucide-react';
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, Tooltip, Cell,
 } from 'recharts';
@@ -474,64 +474,91 @@ export function SectionAiSummaryInsightButton({ context }: { context: SectionAiC
         onClick={() => setOpen(true)}
         className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 text-[11.5px] font-bold text-emerald-800 transition hover:border-emerald-300 hover:bg-emerald-100"
       >
+        <Sparkles size={13} aria-hidden />
         AI Summary &amp; Insight
       </button>
 
       <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent side="right" className="w-[min(96vw,1040px)] overflow-y-auto bg-[#f8faf9] p-0 sm:max-w-[1040px]">
-          {/* Header */}
-          <div className="border-b border-slate-200 bg-white px-6 py-5 pr-14">
-            <SheetHeader>
-              <div className="flex flex-wrap items-start justify-between gap-3">
+        <SheetContent side="right" className="w-[min(96vw,1040px)] overflow-y-auto bg-[#F5F3EE] p-0 sm:max-w-[1040px]">
+          {/* Header — the warm editorial masthead the standalone AI panel used. */}
+          <div className="relative overflow-hidden border-b border-black/[0.06] px-6 py-6 pr-14">
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0"
+              style={{
+                background:
+                  'radial-gradient(1200px 800px at 15% -10%, rgba(0,113,227,0.06), transparent 60%),'
+                  + 'radial-gradient(1000px 600px at 100% 0%, rgba(255,149,0,0.05), transparent 60%),'
+                  + 'radial-gradient(1400px 900px at 80% 100%, rgba(52,199,89,0.04), transparent 60%)',
+              }}
+            />
+
+            <SheetHeader className="relative">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                 <div className="min-w-0">
-                  <SheetTitle className="break-words text-[17px] font-bold text-slate-900">
-                    {context.title}
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">
+                    <Sparkles size={12} className="mr-1.5 inline-block align-[-1px]" aria-hidden />
+                    Wawasan AI
+                  </p>
+                  <SheetTitle className="mt-2 text-[24px] md:text-[30px] font-bold leading-[1.08] tracking-[-0.03em] text-neutral-900">
+                    AI Summary
+                    <span className="text-neutral-400"> &amp; </span>
+                    <span className="text-neutral-500 font-semibold">Insights</span>
                   </SheetTitle>
-                  <p className="mt-0.5 break-words text-[11.5px] text-slate-500">
-                    AI Summary &amp; Insight
+                  <p className="mt-2 max-w-xl break-words text-[13px] leading-relaxed text-neutral-600">
+                    Ringkasan dan wawasan AI untuk{' '}
+                    <span className="font-semibold text-neutral-800">{context.title}</span> — prakiraan
+                    volume laporan, prioritas perhatian, dan pola pergerakan berdasarkan riwayat
+                    laporan iregularitas.
                   </p>
                 </div>
-                <div className="flex shrink-0 items-center gap-3">
+
+                <div className="flex shrink-0 items-center gap-2">
                   {activeTab === 'insight' && <ModelHealthPill enabled={open} />}
                   <button
                     type="button"
                     onClick={handleRefresh}
                     disabled={refreshing}
-                    className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 transition-colors hover:text-emerald-700 disabled:opacity-40"
+                    className={cn(
+                      'inline-flex min-h-[44px] items-center gap-2 rounded-full bg-white px-4 py-2.5',
+                      'text-[13px] font-semibold text-neutral-800',
+                      'ring-1 ring-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.04),0_6px_16px_-8px_rgba(0,0,0,0.08)]',
+                      'transition-all duration-200 hover:shadow-[0_2px_4px_rgba(0,0,0,0.05),0_10px_24px_-8px_rgba(0,0,0,0.12)]',
+                      'disabled:opacity-50',
+                    )}
                   >
-                    <RefreshCw size={13} className={cn(refreshing && 'animate-spin')} />
-                    Refresh
+                    <RefreshCw size={14} className={cn(refreshing && 'animate-spin')} />
+                    Perbarui
                   </button>
                 </div>
               </div>
             </SheetHeader>
 
-            {/* Tabs — underline style */}
-            <div className="mt-4 flex gap-6 border-b border-slate-200">
-              <button
-                type="button"
-                onClick={() => setActiveTab('summary')}
-                className={cn(
-                  'border-b-2 pb-2.5 text-[12.5px] font-bold transition-colors',
-                  activeTab === 'summary' ? 'border-emerald-700 text-emerald-700' : 'border-transparent text-slate-500 hover:text-slate-800',
-                )}
-              >
-                Summary
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('insight')}
-                className={cn(
-                  'border-b-2 pb-2.5 text-[12.5px] font-bold transition-colors',
-                  activeTab === 'insight' ? 'border-emerald-700 text-emerald-700' : 'border-transparent text-slate-500 hover:text-slate-800',
-                )}
-              >
-                Insights
-              </button>
+            {/* Tabs — segmented pills, matching the panel's rounded language */}
+            <div className="relative mt-5 inline-flex items-center gap-1 rounded-full bg-white/70 p-1 ring-1 ring-black/[0.05]">
+              {([
+                { id: 'summary', label: 'Ringkasan' },
+                { id: 'insight', label: 'Wawasan' },
+              ] as const).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  aria-pressed={activeTab === tab.id}
+                  className={cn(
+                    'rounded-full px-4 py-2 text-[12.5px] font-semibold transition-all duration-200',
+                    activeTab === tab.id
+                      ? 'bg-white text-neutral-900 shadow-[0_1px_2px_rgba(0,0,0,0.05),0_6px_16px_-10px_rgba(0,0,0,0.15)]'
+                      : 'text-neutral-500 hover:text-neutral-800',
+                  )}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </div>
           </div>
 
-          <div className="px-6 py-5">
+          <div className="px-6 py-6">
             {activeTab === 'summary' ? (
               <SummaryTab
                 loading={summaryLoading}
@@ -549,7 +576,7 @@ export function SectionAiSummaryInsightButton({ context }: { context: SectionAiC
             )}
 
             {/* Fine print */}
-            <div className={cn(CAPTION, 'mt-5 border-t border-slate-200 pt-4')}>
+            <div className={cn(CAPTION, 'mt-5 border-t border-black/[0.06] pt-4')}>
               {activeTab === 'summary'
                 ? 'Every number is pulled directly from the dashboard data you’re viewing — the AI only writes the narrative.'
                 : 'All figures are estimates based on historical report patterns — not exact numbers. Use them as guidance, not a final decision.'}

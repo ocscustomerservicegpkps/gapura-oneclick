@@ -1,13 +1,13 @@
 import { NextResponse } from 'next/server';
 import { randomUUID, timingSafeEqual } from 'crypto';
-import { checkRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
+import { checkDbRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
 
 const QUICK_ACCESS_PASSWORD = process.env.QUICK_ACCESS_PASSWORD;
 
 export async function POST(request: Request) {
     try {
         const clientIp = getClientIpFromRequest(request);
-        const rateLimit = checkRateLimit(`quick-access:${clientIp}`, 5, 60_000);
+        const rateLimit = await checkDbRateLimit(`quick-access:${clientIp}`, 5, 60_000);
         if (!rateLimit.success) {
             return NextResponse.json({ error: 'Terlalu banyak permintaan. Coba lagi dalam 1 menit.' }, { status: 429 });
         }

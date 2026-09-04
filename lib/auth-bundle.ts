@@ -29,6 +29,18 @@ function getAuthBundleSecret(): string | null {
     return process.env.JWT_SECRET || null;
 }
 
+/**
+ * Fixed context string that separates this key from the session-JWT key.
+ *
+ * JWT_SECRET was previously handed to createHmac directly, so the auth bundle
+ * and the session tokens were signed with the same key for two different
+ * purposes. Deriving a purpose-bound subkey means a weakness or leak in one
+ * construction cannot be replayed against the other. Bump the version suffix to
+ * roll the key; existing bundle cookies fail their signature check and callers
+ * fall back to a normal login, which is the intended rollout behaviour.
+ */
+const BUNDLE_KEY_CONTEXT = 'gapura:auth-bundle:v1';
+
 function signBundlePayload(payload: string): string | null {
     const secret = getAuthBundleSecret();
     if (!secret) {
@@ -36,7 +48,8 @@ function signBundlePayload(payload: string): string | null {
         return null;
     }
 
-    return createHmac('sha256', secret).update(payload).digest('base64url');
+    const key = createHmac('sha256', secret).update(BUNDLE_KEY_CONTEXT).digest();
+    return createHmac('sha256', key).update(payload).digest('base64url');
 }
 
 export function parseAuthBundle(raw: string | null | undefined): AuthBundle | null {

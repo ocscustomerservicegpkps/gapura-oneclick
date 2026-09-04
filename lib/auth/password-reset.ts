@@ -152,7 +152,12 @@ export async function issuePasswordResetOtp(email: string, ipAddress: string | n
         console.error('[PASSWORD_RESET] Failed to send OTP email:', sendError);
     }
 
-    void purgeStaleOtps();
+    // `void` discards the promise, not its rejection: the awaited delete inside
+    // can reject on a transport failure, and an unhandled rejection here is
+    // fatal to the process on Node.
+    void purgeStaleOtps().catch((purgeError) =>
+        console.warn('[PASSWORD_RESET] Stale OTP purge failed:', purgeError),
+    );
 }
 
 /** Best-effort cleanup so the table does not grow without bound. */

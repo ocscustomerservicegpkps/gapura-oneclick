@@ -137,7 +137,16 @@ export function OCSDivisionDashboard({
   const [listSearch, setListSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [showOSDashboardModal, setShowOSDashboardModal] = useState(false);
-  const [osDashboardLink, setOsDashboardLink] = useState<string>(getLinkUrl(externalLinks, 'os-dashboard-analyst'));
+  const [osDashboardLink, setOsDashboardLink] = useState<string>(() => {
+    // Saved on edit (localStorage.setItem below) but only ever read from
+    // externalLinks, so a custom link reverted on every reload.
+    if (typeof window === 'undefined') return getLinkUrl(externalLinks, 'os-dashboard-analyst');
+    try {
+      return localStorage.getItem('os_dashboard_link') || getLinkUrl(externalLinks, 'os-dashboard-analyst');
+    } catch {
+      return getLinkUrl(externalLinks, 'os-dashboard-analyst');
+    }
+  });
 
   const needsCustomerFeedbackData = (division.code === 'OCS' || division.code === 'ANALYST') && showFilterModal;
 
@@ -257,7 +266,9 @@ export function OCSDivisionDashboard({
     }
   }, [lockedBranches, listBranch]);
 
-  const filteredReports = useMemo(() => {
+  // Shared with the JOUMPA rows below: they used to bypass date filtering
+  // entirely, so a date-filtered list still mixed in all-time JOUMPA records.
+  const withinDateRange = useCallback((report: Report) => {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
@@ -278,22 +289,23 @@ export function OCSDivisionDashboard({
     }
 
     const endDate = explicitEndDate || today;
+    const dateStr = report.date_of_event || report.created_at;
+    if (!dateStr) return false;
 
+    let d: Date;
+    if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      const [y, m, day] = dateStr.split('-').map(Number);
+      d = new Date(y, m - 1, day);
+    } else {
+      d = new Date(dateStr);
+    }
+
+    return d >= cutoffDate && d <= endDate;
+  }, [dateRange]);
+
+  const filteredReports = useMemo(() => {
     const safeReports = Array.isArray(reports) ? reports : [];
-    const base = safeReports.filter((r) => {
-      const dateStr = r.date_of_event || r.created_at;
-      if (!dateStr) return false;
-
-      let d: Date;
-      if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-        const [y, m, day] = dateStr.split('-').map(Number);
-        d = new Date(y, m - 1, day);
-      } else {
-        d = new Date(dateStr);
-      }
-
-      return d >= cutoffDate && d <= endDate;
-    });
+    const base = safeReports.filter(withinDateRange);
 
     let result = base;
 
@@ -325,7 +337,7 @@ export function OCSDivisionDashboard({
     }
 
     return result;
-  }, [reports, dateRange, globalFilters, lockedBranches]);
+  }, [reports, globalFilters, lockedBranches, withinDateRange]);
   const listFilterOptions = useMemo(() => {
     const uniqueSorted = (values: string[]) => Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b));
     return {
@@ -351,10 +363,11 @@ export function OCSDivisionDashboard({
     setListSource('all');
   }, []);
   const scopedJoumpaReports = useMemo(() => {
-    if (!lockedBranches || lockedBranches.length === 0) return joumpaReports;
+    const dated = joumpaReports.filter(withinDateRange);
+    if (!lockedBranches || lockedBranches.length === 0) return dated;
     const allowed = new Set(lockedBranches.map((b) => b.toUpperCase()));
-    return joumpaReports.filter((r) => allowed.has((r.stations?.code || r.branch || '').toString().toUpperCase()));
-  }, [joumpaReports, lockedBranches]);
+    return dated.filter((r) => allowed.has((r.stations?.code || r.branch || '').toString().toUpperCase()));
+  }, [joumpaReports, lockedBranches, withinDateRange]);
   const listReportsBase = useMemo(
     () => [...filteredReports, ...scopedJoumpaReports],
     [filteredReports, scopedJoumpaReports]

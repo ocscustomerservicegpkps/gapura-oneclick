@@ -60,6 +60,14 @@ const DIVISION_VIEWER_ROLES = [
     'DIVISI_HT', 'PARTNER_HT',
 ];
 
+// Pages under /auth that are meant for everyone, signed in or not. They must
+// not bounce an authenticated visitor to their dashboard: quick access is a
+// destination in its own right (guest reporting, the virtual assistant tile),
+// and a session cookie that outlives a logout by a moment — the logout POST is
+// fired optimistically while the browser is already navigating — used to throw
+// a just-signed-out user onto "Choose Workspace" instead.
+const PUBLIC_AUTH_PAGES = ['/auth/public-report'];
+
 // Escalation sub-pages a division user is allowed to open (the rest are eskalasi-only).
 const ESKALASI_SHARED_PATHS = [
     '/dashboard/eskalasi/select',
@@ -84,6 +92,9 @@ export default async function proxy(request: NextRequest) {
     const isDemo = demoEnabled && (request.nextUrl.searchParams.get('demo') === '1' || request.headers.get('x-demo') === 'true');
 
     const isAuthPagePath = path.startsWith('/auth');
+    const isPublicAuthPage = PUBLIC_AUTH_PAGES.some(
+        (p) => path === p || path.startsWith(`${p}/`),
+    );
     const isAuthApiPath = path.startsWith('/api/auth');
     const isAuthPath = isAuthPagePath || isAuthApiPath;
     const isSyncEndpoint = path === '/api/admin/sync-reports';
@@ -141,7 +152,7 @@ export default async function proxy(request: NextRequest) {
         const role = String(payload.role).trim().toUpperCase();
         const division = String(payload.division || '').trim().toUpperCase();
 
-        if (isAuthPagePath && path !== '/api/auth/logout' && !isLogoutTransition) {
+        if (isAuthPagePath && !isPublicAuthPage && path !== '/api/auth/logout' && !isLogoutTransition) {
             const dashboardUrl = ROLE_DASHBOARDS[role] || '/dashboard/employee';
             return NextResponse.redirect(new URL(dashboardUrl, request.url));
         }
@@ -187,7 +198,7 @@ export default async function proxy(request: NextRequest) {
              return NextResponse.redirect(new URL(homeFor(role), request.url));
         }
         // Shared operational monitoring dashboard (the "blue" card) for every division.
-        if (path.startsWith('/dashboard/op') && !DIVISION_VIEWER_ROLES.includes(role)) {
+        if (path.startsWith('/dashboard/operasional') && !DIVISION_VIEWER_ROLES.includes(role)) {
              return NextResponse.redirect(new URL(homeFor(role), request.url));
         }
         if (path.startsWith('/dashboard/hc') && !['DIVISI_HC', 'PARTNER_HC', 'ANALYST', 'SUPER_ADMIN'].includes(role)) {

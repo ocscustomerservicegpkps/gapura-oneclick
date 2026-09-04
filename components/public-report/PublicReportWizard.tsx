@@ -42,6 +42,7 @@ import PublicIrregularityForm from '@/components/public-report/PublicIrregularit
 import { generatePDF, generateWord } from '@/lib/utils/document-generator';
 import { finalizeReportDocuments } from '@/lib/report-documents-client';
 import { toLocalDateInput } from './apple-form-shell';
+import { EVIDENCE_ACCEPT, EVIDENCE_HINT, checkEvidenceFile, evidenceKindFromUrl } from '@/lib/evidence-mime';
 import {
   validatePublicReportFlightStation,
   type PublicReportValidationErrors,
@@ -56,6 +57,44 @@ const QRCodeWithLogo = dynamic(
     ),
   }
 );
+
+/**
+ * Evidence is no longer image-only, so the confirmation grid renders by kind:
+ * a thumbnail for images, an inline player for video, a labelled card for
+ * documents (which have nothing to show until they are opened).
+ */
+function EvidencePreviewTile({ url, index }: { url: string; index: number }) {
+  const kind = evidenceKindFromUrl(url);
+
+  if (kind === 'video') {
+    return <video src={url} controls preload="metadata" className="h-full w-full bg-black object-cover" />;
+  }
+
+  if (kind === 'document') {
+    // decodeURIComponent throws URIError on a lone `%`, which would take the
+    // whole wizard down over a filename like "50%_bagasi.pdf".
+    const rawName = url.split('/').pop()?.split('?')[0] || `Document ${index + 1}`;
+    let name = rawName;
+    try {
+      name = decodeURIComponent(rawName);
+    } catch {
+      // Not percent-encoded — the raw segment is the better label anyway.
+    }
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex h-full w-full flex-col items-center justify-center gap-2 bg-[oklch(0.15_0.02_200_/_0.03)] p-3 text-center"
+      >
+        <ClipboardCheck className="h-7 w-7 text-[oklch(0.15_0.02_200_/_0.35)]" />
+        <span className="line-clamp-2 break-all text-[11px] font-bold text-[oklch(0.15_0.02_200_/_0.6)]">{name}</span>
+      </a>
+    );
+  }
+
+  return <Image src={url} alt={`Evidence ${index + 1}`} width={800} height={600} className="h-full w-full object-cover" />;
+}
 
 export function PublicReportWizard({
     initialCategory = null,
@@ -110,7 +149,12 @@ export function PublicReportWizard({
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [evidenceUploadStatuses, setEvidenceUploadStatuses] = useState<Record<string, EvidenceUploadStatus>>({});
   const [evidenceSubmissionId, setEvidenceSubmissionId] = useState(() => crypto.randomUUID());
-  const [evidenceFileIds, setEvidenceFileIds] = useState<string[]>([]);
+  // Keyed by evidence URL, not a parallel array. The two drifted apart
+  // whenever an upload response carried no id or the Set dedupe collapsed a
+  // repeat, after which removeEvidenceAt() dropped the id belonging to a
+  // different file — so a report could be submitted attaching evidence the
+  // reporter had removed and omitting what they kept.
+  const [evidenceIdByUrl, setEvidenceIdByUrl] = useState<Record<string, string>>({});
   const [duplicateCandidates, setDuplicateCandidates] = useState<DuplicateCandidate[]>([]);
   const [duplicateCheckLoading, setDuplicateCheckLoading] = useState(false);
   const [duplicateCheckDone, setDuplicateCheckDone] = useState(false);
@@ -478,22 +522,25 @@ export function PublicReportWizard({
   const uploadEvidenceFiles = async (files: File[]) => {
     const uploadedUrls: string[] = [];
     const uploadedFileIds: string[] = [];
+    const uploadedIdByUrl: Record<string, string> = {};
     const failedKeys: string[] = [];
     const successKeys: string[] = [];
     const token = await getUploadToken();
     for (const file of files) {
       const key = evidenceFileKey(file);
-      if (!file.type.startsWith('image/')) {
+      const check = checkEvidenceFile(file);
+      if (!check.ok) {
         failedKeys.push(key);
-        setEvidenceUploadStatuses((prev) => ({ ...prev, [key]: { status: 'failed', message: 'File harus berupa gambar.' } }));
+        setEvidenceUploadStatuses((prev) => ({ ...prev, [key]: { status: 'failed', message: check.error } }));
         continue;
       }
 
       setEvidenceUploadStatuses((prev) => ({ ...prev, [key]: { status: 'uploading' } }));
       try {
-        const compressed = await compressImage(file);
+        // Only images survive a canvas round-trip — videos and documents are sent as-is.
+        const payload = check.kind === 'image' ? await compressImage(file) : file;
         const fd = new FormData();
-        fd.append('file', compressed);
+        fd.append('file', payload);
         fd.append('evidence_submission_id', evidenceSubmissionId);
         fd.append('reporter_name', formData.reporter_name.trim());
         fd.append('reporter_email', formData.reporter_email.trim());
@@ -514,8 +561,10 @@ export function PublicReportWizard({
         }
         const data = await res.json();
         uploadedUrls.push(data.url);
-        if (data.evidence_file_id || data.evidenceFileId) {
-          uploadedFileIds.push(data.evidence_file_id || data.evidenceFileId);
+        const fileId = data.evidence_file_id || data.evidenceFileId;
+        if (fileId) {
+          uploadedFileIds.push(fileId);
+          uploadedIdByUrl[data.url] = fileId;
         }
         successKeys.push(key);
         setEvidenceUploadStatuses((prev) => ({ ...prev, [key]: { status: 'uploaded', url: data.url } }));
@@ -528,9 +577,9 @@ export function PublicReportWizard({
       }
     }
     if (uploadedFileIds.length > 0) {
-      setEvidenceFileIds((prev) => [...new Set([...prev, ...uploadedFileIds])]);
+      setEvidenceIdByUrl((prev) => ({ ...prev, ...uploadedIdByUrl }));
     }
-    return { uploadedUrls, uploadedFileIds, failedKeys, successKeys };
+    return { uploadedUrls, uploadedFileIds, uploadedIdByUrl, failedKeys, successKeys };
   };
 
   /**
@@ -538,8 +587,14 @@ export function PublicReportWizard({
    * @param index - Indeks bukti yang akan dihapus
    */
   const removeEvidenceAt = (index: number) => {
+    const removedUrl = formData.evidence_urls[index];
     setFormData((prev) => ({ ...prev, evidence_urls: prev.evidence_urls.filter((_, i) => i !== index) }));
-    setEvidenceFileIds((prev) => prev.filter((_, i) => i !== index));
+    setEvidenceIdByUrl((prev) => {
+      if (!removedUrl || !(removedUrl in prev)) return prev;
+      const next = { ...prev };
+      delete next[removedUrl];
+      return next;
+    });
   };
 
   const removeSelectedFileAt = (index: number) => {
@@ -615,7 +670,18 @@ export function PublicReportWizard({
   const prevStep = () => setStep((prev) => Math.max(prev - 1, 1));
 
   const selectedCategory = CATEGORIES.find(c => c.id === formData.main_category);
-  const showWizardFooter = selectedCategory?.id === 'Irregularity';
+  // Hiding the footer for every category except Irregularity took Back/Next/
+  // Submit away with it, leaving no way out of the modal but the X — which
+  // discards everything typed so far. The footer belongs to the wizard, not to
+  // one category. Categories that are just a list of QR codes or links are the
+  // exception: there is no form to step through, so there is nothing for
+  // Back/Next to do.
+  const isLinkOnlyCategory = Boolean(
+    selectedCategory &&
+    (Array.isArray((selectedCategory as { qrLinks?: unknown[] }).qrLinks) ||
+     Array.isArray((selectedCategory as { links?: unknown[] }).links))
+  );
+  const showWizardFooter = step > 1 || (Boolean(selectedCategory) && !isLinkOnlyCategory);
 
   /**
    * Type guard untuk mengecek apakah kategori memiliki QR links
@@ -919,12 +985,12 @@ export function PublicReportWizard({
       const stationCode = selectedStation?.code || formData.station_id || '';
       const eventDate = new Date(formData.incident_date);
       let evidenceUrls = [...formData.evidence_urls];
-      let currentEvidenceFileIds = [...evidenceFileIds];
+      let idByUrl: Record<string, string> = { ...evidenceIdByUrl };
 
       if (navigator.onLine && selectedFiles.length > 0) {
-        const { uploadedUrls, uploadedFileIds, failedKeys, successKeys } = await uploadEvidenceFiles(selectedFiles);
+        const { uploadedUrls, uploadedIdByUrl, failedKeys, successKeys } = await uploadEvidenceFiles(selectedFiles);
         evidenceUrls = [...evidenceUrls, ...uploadedUrls];
-        currentEvidenceFileIds = [...new Set([...currentEvidenceFileIds, ...uploadedFileIds])];
+        idByUrl = { ...idByUrl, ...uploadedIdByUrl };
         setFormData((prev) => ({ ...prev, evidence_urls: [...prev.evidence_urls, ...uploadedUrls] }));
         setSelectedFiles((prev) => prev.filter((file) => !successKeys.includes(evidenceFileKey(file))));
         if (failedKeys.length > 0) {
@@ -954,7 +1020,9 @@ export function PublicReportWizard({
         reporter_email: reporterEmail,
         evidence_urls: evidenceUrls,
         evidence_url: evidenceUrls[0],
-        evidence_file_ids: currentEvidenceFileIds,
+        // Derived from the URLs that actually survived, so the ids can never
+        // describe a different set of files than evidence_urls does.
+        evidence_file_ids: evidenceUrls.map((url) => idByUrl[url]).filter(Boolean),
         evidence_submission_id: evidenceSubmissionId,
         quick_access_session_id: quickAccessSessionId,
         preventive_action: formData.preventive_action,
@@ -1156,7 +1224,7 @@ export function PublicReportWizard({
     setStep(1);
     setSelectedFiles([]);
     setEvidenceUploadStatuses({});
-    setEvidenceFileIds([]);
+    setEvidenceIdByUrl({});
     setEvidenceSubmissionId(crypto.randomUUID());
     setQuickAccessSessionId(null);
     setDuplicateCandidates([]);
@@ -1904,9 +1972,9 @@ export function PublicReportWizard({
                               <input
                                 ref={fileInputRef}
                                 type="file"
-                                accept="image/*"
+                                accept={EVIDENCE_ACCEPT}
                                 multiple
-                                aria-label="Upload evidence photos"
+                                aria-label="Upload evidence files"
                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                                 onChange={(e) => {
                                   const incomingFiles = Array.from(e.target.files || []);
@@ -1937,7 +2005,7 @@ export function PublicReportWizard({
                                 <Upload className="w-8 h-8 text-[oklch(0.15_0.02_200_/_0.3)] group-hover:text-emerald-600 mx-auto transition-colors" />
                                 <div>
                                   <p className="text-sm font-bold text-[oklch(0.15_0.02_200_/_0.6)]">Click to upload</p>
-                                  <p className="text-xs text-[oklch(0.15_0.02_200_/_0.3)]">Images only (auto-compressed, multiple files supported)</p>
+                                  <p className="text-xs text-[oklch(0.15_0.02_200_/_0.3)]">{EVIDENCE_HINT}</p>
                                 </div>
                               </div>
                             </div>
@@ -1952,7 +2020,7 @@ export function PublicReportWizard({
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                           {formData.evidence_urls.map((url, idx) => (
                             <div key={idx} className="relative group aspect-square rounded-xl overflow-hidden bg-white border border-[oklch(0.15_0.02_200_/_0.08)]">
-                              <Image src={url} alt={`Evidence ${idx + 1}`} width={800} height={600} className="w-full h-full object-cover" />
+                              <EvidencePreviewTile url={url} index={idx} />
                               <button
                                 type="button"
                                 onClick={() => removeEvidenceAt(idx)}
@@ -2064,11 +2132,16 @@ export function PublicReportWizard({
 	                          {duplicateCandidates.map((candidate) => (
 	                            <div key={candidate.id} className="rounded-xl border border-amber-200 bg-white px-4 py-3">
 	                              <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
-	                                <p className="text-sm font-bold text-[oklch(0.15_0.05_200)]">{candidate.title}</p>
+	                                <p className="text-sm font-bold text-[oklch(0.15_0.05_200)]">{candidate.title || 'Laporan serupa sudah tercatat'}</p>
 	                                <span className="text-xs font-black uppercase text-amber-700">{Math.round(candidate.similarity * 100)}% similar</span>
 	                              </div>
 	                              <p className="mt-1 text-xs font-medium text-amber-700">
-	                                {candidate.date_of_event?.slice(0, 10) || '-'} · {candidate.station_id || '-'} · {candidate.airline || '-'} {candidate.flight_number || ''} · {candidate.status}
+	                                {[
+                                  candidate.date_of_event?.slice(0, 10),
+                                  candidate.station_id,
+                                  [candidate.airline, candidate.flight_number].filter(Boolean).join(' ') || null,
+                                  candidate.status,
+                                ].filter(Boolean).join(' · ')}
 	                              </p>
 	                            </div>
 	                          ))}

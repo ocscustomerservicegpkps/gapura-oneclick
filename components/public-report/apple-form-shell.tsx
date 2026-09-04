@@ -723,6 +723,16 @@ export const FORM_CSS = `
   color: var(--mute);
   background: var(--fill);
 }
+/* Video tile: first frame behind a centred play glyph. */
+.jm-evidence__fallback--video { position: relative; background: #000; color: #fff; }
+.jm-evidence__fallback--video video {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%; object-fit: cover;
+}
+.jm-evidence__fallback--video svg {
+  position: relative;
+  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.6));
+}
 .jm-evidence__badge {
   position: absolute; bottom: 6px; left: 6px;
   padding: 3px 8px;

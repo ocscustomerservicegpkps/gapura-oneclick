@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
 import { verifySession } from '@/lib/auth-utils';
+import { getSecurityRouteToken } from '@/lib/security/route-auth';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { logSecurityAudit } from '@/lib/security/audit-logger';
 import { SecurityStats, SecurityAlert, AuthMetrics, NetworkStatus, ThreatActor } from '@/types/security';
 
 export async function GET(request: Request) {
-    const authHeader = request.headers.get('Authorization');
-    const token = authHeader?.split(' ')[1] || request.headers.get('cookie')?.split('session=')[1]?.split(';')[0];
+    const token = await getSecurityRouteToken(request);
 
     if (!token) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -100,18 +100,7 @@ export async function GET(request: Request) {
         });
     }
 
-    const [
-        { count: totalBlocked },
-        { count: malwareDetected },
-        { count: intrusionAttempts },
-        { data: liveAlerts },
-        { count: failedAttempts },
-        { count: successfulLogins },
-        { data: lastTraffic },
-        { data: threatEvents },
-        { data: blockedIpsData },
-        { count: totalUsers }
-    ] = await Promise.all([
+    const results = await Promise.all([
         supabaseAdmin.from('security_events').select('id', { count: 'exact', head: true }).eq('event_type', 'blocked'),
         supabaseAdmin.from('security_events').select('id', { count: 'exact', head: true }).eq('event_type', 'malware'),
         supabaseAdmin.from('security_events').select('id', { count: 'exact', head: true }).eq('event_type', 'login').eq('payload->>success', 'false'),
@@ -123,6 +112,29 @@ export async function GET(request: Request) {
         supabaseAdmin.from('blocked_ips').select('ip_address'),
         supabaseAdmin.from('users').select('id', { count: 'exact', head: true })
     ]);
+
+    // Every one of these was destructured for its count/data only, so a failing
+    // query silently became 0 or []. On a security dashboard that reads as
+    // "nothing is happening" — the same picture as a quiet day — which is the
+    // worst possible way to fail.
+    const failed = results.find((result) => result.error);
+    if (failed) {
+        console.error('[SECURITY_DASHBOARD] Query failed:', failed.error);
+        return NextResponse.json({ error: 'Failed to load security data' }, { status: 500 });
+    }
+
+    const [
+        { count: totalBlocked },
+        { count: malwareDetected },
+        { count: intrusionAttempts },
+        { data: liveAlerts },
+        { count: failedAttempts },
+        { count: successfulLogins },
+        { data: lastTraffic },
+        { data: threatEvents },
+        { data: blockedIpsData },
+        { count: totalUsers }
+    ] = results;
 
     const stats: SecurityStats = {
         totalBlocked: totalBlocked || 0,
@@ -152,13 +164,18 @@ export async function GET(request: Request) {
     };
 
     const totalTrafficBytes = lastTraffic?.reduce((acc, curr) => acc + (curr.payload?.bytes || 0), 0) || 0;
-    const baseTrafficIn = (lastTraffic?.length || 0) > 0 ? totalTrafficBytes : (2.4e6 + Math.random() * 1e6);
+    // No traffic events means no traffic to report. Substituting
+    // `2.4e6 + Math.random() * 1e6` put invented megabytes on a security
+    // dashboard, indistinguishable from a real reading and different on every
+    // refresh — the one place a fabricated number is actively harmful. Same
+    // reason activeConnections is no longer floored at 1.
+    const baseTrafficIn = totalTrafficBytes;
     const uniqueThreatIps = new Set((threatEvents || []).map(e => e.ip_address)).size;
 
     const network: NetworkStatus = {
         trafficIn: Math.floor(baseTrafficIn * 0.7),
         trafficOut: Math.floor(baseTrafficIn * 0.3),
-        activeConnections: Math.max(uniqueThreatIps, lastTraffic?.length || 0, 1),
+        activeConnections: Math.max(uniqueThreatIps, lastTraffic?.length || 0),
         portScansDetected: liveAlerts?.filter(a => a.title.toLowerCase().includes('scan')).length || 0
     };
 

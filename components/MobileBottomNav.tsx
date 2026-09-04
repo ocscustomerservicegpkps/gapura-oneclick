@@ -78,7 +78,7 @@ export function MobileBottomNav({ role, division }: MobileBottomNavProps) {
     }, []);
     const confirmLogout = useCallback(() => {
         setLogoutConfirmOpen(false);
-        performOptimisticLogout();
+        void performOptimisticLogout();
     }, []);
 
     const navData = useMemo(() => {
@@ -120,20 +120,27 @@ export function MobileBottomNav({ role, division }: MobileBottomNavProps) {
             const homeItem = configItems.find(i => /dashboard/i.test(i.label)) || configItems[0];
             const reportsItem = configItems.find(i => /report/i.test(i.label) && i.href !== homeItem?.href);
 
-            if (homeItem) items.push({ href: homeItem.href, label: 'Home', icon: LayoutDashboard });
-            if (reportsItem) items.push({ href: reportsItem.href, label: 'Reports', icon: FileText });
+            // The nav config is fixed per role, so these point at the user's own
+            // division. While an OCS/OS user is actually browsing Operational
+            // Monitoring, repoint them there so the tabs don't yank the user back
+            // mid-browse (same remap as Sidebar.tsx).
+            const isOcsOrOs = role === 'DIVISI_OCS' || role === 'PARTNER_OCS'
+                || role === 'DIVISI_OS' || role === 'PARTNER_OS';
+            const onOperational = isOcsOrOs && pathname.startsWith('/dashboard/operasional');
+
+            if (homeItem) items.push({ href: onOperational ? '/dashboard/operasional' : homeItem.href, label: 'Home', icon: LayoutDashboard });
+            if (reportsItem) items.push({ href: onOperational ? '/dashboard/operasional/reports' : reportsItem.href, label: 'Reports', icon: FileText });
 
             items.push({ href: '/dashboard/employee/new', label: 'Create', icon: PlusCircle, isPrimary: true });
 
             const isOpOrOs = role === 'DIVISI_OP' || role === 'PARTNER_OP'
                 || (role === 'DIVISI_OS' || role === 'DIVISI_OCS') || role === 'PARTNER_OS';
-            // Only link to divisions that actually have an ai-reports page — linking to a
-            // generic '/dashboard/ai-reports' 404s since that route doesn't exist.
+            // Analyst and Super Admin are the only roles with a standalone
+            // ai-reports route. Division roles read the AI overview from the
+            // AI Summary & Insights panel on their own dashboard instead.
             const aiReportsHref = role === 'ANALYST' || role.includes('SUPER') || role === 'ADMIN'
                 ? '/dashboard/analyst/ai-reports'
-                : (role === 'DIVISI_HT' || role === 'PARTNER_HT')
-                    ? '/dashboard/ht/ai-reports'
-                    : null;
+                : null;
             if (!isOpOrOs && aiReportsHref) {
                 items.push({ href: aiReportsHref, label: 'AI', icon: Brain });
             }
@@ -143,7 +150,7 @@ export function MobileBottomNav({ role, division }: MobileBottomNavProps) {
         }
 
         return items;
-    }, [role, division]);
+    }, [role, division, pathname]);
 
     return (
         <>
@@ -169,7 +176,7 @@ export function MobileBottomNav({ role, division }: MobileBottomNavProps) {
                             >
                                 {navItems.map((item, idx) => {
                                     const Icon = item.icon;
-                                    // Divisi dashboards (e.g. /dashboard/op) render their "Reports" tab
+                                    // Divisi dashboards (e.g. /dashboard/operasional) render their "Reports" tab
                                     // via a ?view=reports query on the same pathname rather than
                                     // navigating to <pathname>/reports, so pathname-only matching can't
                                     // tell Home and Reports apart there.

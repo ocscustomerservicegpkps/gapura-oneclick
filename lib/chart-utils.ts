@@ -1,5 +1,11 @@
 
-export const ISO_DATETIME_RE = /^\d{4}(?:-\d{2}(?:-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?)?)?)?$/;
+// Requires a month: with the whole tail optional, a bare `\d{4}` matched, so
+// any four-digit value — flight numbers, reference numbers, a literal year
+// label on an axis — was detected as a date and reformatted as one.
+export const ISO_DATETIME_RE = /^\d{4}-\d{2}(?:-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?)?)?$/;
+
+/** Date-only forms from the pattern above, which must not be read as UTC instants. */
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/;
 
 const DATE_HINT_TOKENS = new Set(['date', 'datetime', 'timestamp', 'created', 'updated', 'time']);
 
@@ -38,6 +44,19 @@ function parseDate(val: unknown): Date | null {
   if (!str) return null;
 
   if (ISO_DATETIME_RE.test(str)) {
+    // `new Date('2025-07-15')` is midnight *UTC*, which renders as the 14th for
+    // any viewer behind UTC — a bare date on an axis is a calendar day, so it
+    // is built from its own components in local time instead.
+    const dateOnly = DATE_ONLY_RE.exec(str);
+    if (dateOnly) {
+      const d = new Date(
+        Number(dateOnly[1]),
+        Number(dateOnly[2]) - 1,
+        dateOnly[3] ? Number(dateOnly[3]) : 1
+      );
+      if (!isNaN(d.getTime())) return d;
+    }
+
     const d = new Date(str.includes(' ') && !str.includes('T') ? str.replace(' ', 'T') : str);
     if (!isNaN(d.getTime())) return d;
   }

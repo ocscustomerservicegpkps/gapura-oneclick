@@ -60,8 +60,16 @@ export async function getInitialCalendarEvents(calendarType: 'event' | 'meeting'
     .lte('event_date', end)
     .order('event_date', { ascending: true });
 
-  query = query.or(`event_end_date.gte.${start},event_end_date.is.null`);
-  query = query.gte('event_date', start).or(`event_end_date.gte.${start}`);
+  // One condition set, because PostgREST ANDs repeated `or=` parameters. The
+  // second `.or()` here carried no `is.null` branch, so it ANDed away every
+  // single-day event (those store a null end date) — and `.gte('event_date')`
+  // additionally dropped multi-day events that began before the range but are
+  // still running inside it. Paired with the `.lte('event_date', end)` above,
+  // this is the overlap test: starts on or before the range ends, and ends on
+  // or after it begins.
+  query = query.or(
+    `event_end_date.gte.${start},and(event_end_date.is.null,event_date.gte.${start})`,
+  );
 
   const { data, error } = await query;
   if (error || !Array.isArray(data)) {

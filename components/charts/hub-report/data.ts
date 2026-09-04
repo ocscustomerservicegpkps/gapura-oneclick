@@ -1,6 +1,7 @@
 'use client';
 
 import { Report } from '@/types';
+import { buildEvidenceLinkHtml } from '@/lib/charts/evidence-link-html';
 
 export interface HubSummary {
   hub: string;
@@ -384,59 +385,12 @@ export function fetchAreaByHub(reports: Report[], filters: BaseFilters = {}): Ar
     .slice(0, 30);
 }
 
-function escapeHtmlAttr(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function toSafeHttpUrl(candidate: string): string | null {
-  try {
-    const parsed = new URL(candidate);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null;
-  } catch {
-    return null;
-  }
-}
-
-function buildEvidenceLinkHtml(evidenceUrls: unknown): string {
-  if (!evidenceUrls) return '-';
-
-  const rawCandidates: string[] = Array.isArray(evidenceUrls)
-    ? evidenceUrls.map(String)
-    : typeof evidenceUrls === 'string'
-      ? (() => {
-          const trimmed = evidenceUrls.trim();
-          if (!trimmed) return [];
-          // A single URL can legitimately contain commas (query strings, path
-          // segments) — only split on delimiters when the whole value isn't
-          // already one valid URL by itself. Comma is deliberately excluded
-          // from the delimiter set once we do split.
-          if (toSafeHttpUrl(trimmed)) return [trimmed];
-          return trimmed.split(/[;\s]+/).filter(Boolean);
-        })()
-      : [];
-
-  const urls = rawCandidates
-    .map((candidate) => toSafeHttpUrl(candidate.trim()))
-    .filter((url): url is string => url !== null);
-
-  if (urls.length === 0) return '-';
-
-  return urls
-    .map((url, i) => `<a href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">Evidence ${i + 1}</a>`)
-    .join(', ');
-}
-
 export function fetchAllHubReports(reports: Report[], filters: BaseFilters = {}): HubReportRecord[] {
   const filtered = filterReports(reports, filters);
 
   return filtered.map(report => {
     const evidenceUrls = report.evidence_url || report.evidence_urls;
-    const evidenceLink = buildEvidenceLinkHtml(evidenceUrls);
+    const evidenceLink = buildEvidenceLinkHtml(evidenceUrls, { label: 'Evidence', separator: ', ' });
 
     return {
       Date: (report.date_of_event || report.created_at) ? new Date(report.date_of_event || report.created_at || '').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '-',

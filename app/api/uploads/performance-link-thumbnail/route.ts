@@ -54,8 +54,11 @@ export async function POST(request: Request) {
         }, { status: 201 });
     } catch (error) {
         console.error('[Performance Link Thumbnail Upload] Failed:', error);
+        // Fixed message, matching the other upload routes — the upstream text
+        // is Drive/Storage internals (bucket names, folder ids, credentials
+        // errors) and belongs in the log, not the response.
         return NextResponse.json(
-            { error: error instanceof Error ? error.message : 'Failed to upload thumbnail' },
+            { error: 'Failed to upload thumbnail' },
             { status: 500 }
         );
     }

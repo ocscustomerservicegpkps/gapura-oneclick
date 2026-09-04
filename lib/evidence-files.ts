@@ -71,21 +71,47 @@ export function normalizeEvidenceFileIds(value: unknown): string[] {
   return [];
 }
 
-function normalizeUrlList(value: unknown): string[] {
-  if (Array.isArray(value)) return value.filter(Boolean).map(String);
-  if (typeof value === 'string' && value.trim()) {
-    return value.split(/\s*\|\s*|\n+/).map((item) => item.trim()).filter(Boolean);
+/**
+ * Evidence URLs are rendered as `<a href={url} target="_blank">` in the report
+ * detail view, so a stored `javascript:` URL runs in the session of whoever
+ * clicks it. Anything that is not plain http(s) is dropped at the boundary.
+ */
+export function isSafeEvidenceUrl(value: unknown): boolean {
+  const raw = String(value ?? '').trim();
+  if (!raw) return false;
+  try {
+    return ['http:', 'https:'].includes(new URL(raw).protocol);
+  } catch {
+    return false;
   }
-  return [];
+}
+
+export function normalizeUrlList(value: unknown): string[] {
+  const list = Array.isArray(value)
+    ? value.filter(Boolean).map(String)
+    : typeof value === 'string' && value.trim()
+      ? value.split(/\s*\|\s*|\n+/).map((item) => item.trim()).filter(Boolean)
+      : [];
+  return list.filter(isSafeEvidenceUrl);
 }
 
 async function resolveUserIdByEmail(email: string | null) {
   if (!email) return null;
 
+  const normalized = String(email).trim().toLowerCase();
+  if (!normalized) return null;
+
+  // Escape LIKE metacharacters (%, _, \) — same treatment as
+  // findRegisteredUserByEmail. Unescaped, this took the reporter e-mail
+  // straight off the public upload form into a pattern match: the form's own
+  // validator accepts `%@%.%`, which matched an arbitrary real account and
+  // attributed a stranger's evidence upload to it.
+  const escaped = normalized.replace(/[\\%_]/g, (c) => `\\${c}`);
+
   const { data } = await supabaseAdmin
     .from('users')
     .select('id')
-    .ilike('email', email)
+    .ilike('email', escaped)
     .limit(1)
     .maybeSingle();
 
@@ -188,6 +214,30 @@ export async function recordEvidenceUpload(input: RecordEvidenceUploadInput) {
     submissionId: data.session_id as string,
     url: data.web_view_link as string,
   };
+}
+
+/**
+ * A replayed offline submission carries the evidence_submission_id it was
+ * queued with. Nothing checked it, so a queue item whose response was lost —
+ * committed server-side, never seen by the client — was re-POSTed on the next
+ * flush and became a second copy of the same report in the sheet.
+ */
+export async function findReportBySubmissionId(submissionId: string | null) {
+  if (!submissionId) return null;
+  const { data, error } = await supabaseAdmin
+    .from('ground_handling_irregularity_report')
+    .select('id, sheet_id, original_id')
+    .eq('evidence_submission_id', submissionId)
+    .limit(1);
+  if (error) {
+    // Must not degrade to "no existing report": this lookup is the only thing
+    // stopping a replayed offline submission from filing a duplicate, so a
+    // transient DB error would quietly produce the exact duplicate it exists to
+    // prevent. Failing the request leaves the item queued for another attempt.
+    console.error('[EVIDENCE] submission lookup failed:', error.message);
+    throw new Error('Evidence submission lookup failed');
+  }
+  return data?.[0] ?? null;
 }
 
 export async function validateEvidenceForReport(input: EvidenceValidationInput) {

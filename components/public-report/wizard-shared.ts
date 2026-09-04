@@ -144,10 +144,15 @@ export type EvidenceUploadStatus = {
   url?: string;
 };
 
+/**
+ * Everything but `id`, `date_of_event` and `similarity` is null for anonymous
+ * callers — /api/reports/duplicates/check withholds the incident's own title
+ * and status from the public wizard, since a match there only needs to warn.
+ */
 export type DuplicateCandidate = {
   id: string;
-  title: string;
-  status: string;
+  title: string | null;
+  status: string | null;
   date_of_event: string | null;
   station_id: string | null;
   airline: string | null;

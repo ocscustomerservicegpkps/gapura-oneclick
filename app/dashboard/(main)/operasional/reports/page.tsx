@@ -7,7 +7,7 @@ export default function OPReportsPage() {
     const router = useRouter();
 
     useEffect(() => {
-        router.replace('/dashboard/op?view=reports');
+        router.replace('/dashboard/operasional?view=reports');
     }, [router]);
 
     return null;

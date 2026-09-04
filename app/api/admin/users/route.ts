@@ -249,6 +249,10 @@ export async function POST(request: Request) {
             newDivision = 'GENERAL';
         }
 
+        // Deliberately unknowable: generated, hashed, and never returned or
+        // sent anywhere. An admin-created account is claimed through the OTP
+        // password-reset flow (lib/auth/password-reset.ts), so there is no
+        // plaintext credential to leak into this response or an admin's logs.
         const tempPassword = randomBytes(12).toString('base64url').slice(0, 16) + '8A!';
         const hashed = await hashPassword(tempPassword);
 
@@ -366,9 +370,21 @@ export async function PATCH(request: Request) {
         const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
         if (payload.role === 'SUPER_ADMIN') {
+            // A super admin editing their own row can lock themselves out —
+            // suspending the account or handing it a lesser role are both
+            // one-way doors, since the resulting user can no longer reach this
+            // endpoint to undo it. Editing anyone else is unaffected.
+            const isSelf = userId === payload.id;
+
             if (status) {
                 if (!VALID_STATUSES.includes(status)) {
                     return NextResponse.json({ error: 'Invalid status' }, { status: 400 });
+                }
+                if (isSelf && status !== 'active') {
+                    return NextResponse.json(
+                        { error: 'Tidak dapat menonaktifkan akun Super Admin Anda sendiri' },
+                        { status: 400 },
+                    );
                 }
                 updates.status = status;
             }
@@ -376,6 +392,12 @@ export async function PATCH(request: Request) {
             if (role) {
                 if (!VALID_ROLES.includes(role)) {
                     return NextResponse.json({ error: 'Invalid role' }, { status: 400 });
+                }
+                if (isSelf && role !== 'SUPER_ADMIN') {
+                    return NextResponse.json(
+                        { error: 'Tidak dapat menurunkan role Super Admin Anda sendiri' },
+                        { status: 400 },
+                    );
                 }
                 updates.role = role;
             }

@@ -6,7 +6,7 @@ import {
     isBranchRole,
     normalizeRole,
 } from '@/lib/server/workspace-auth';
-import { canReadDivisionDocument } from './[id]/route';
+import { canReadDivisionDocument } from '@/lib/server/division-document-access';
 import { deleteDriveFile } from '@/lib/google-drive';
 import type {
     DivisionDocument,

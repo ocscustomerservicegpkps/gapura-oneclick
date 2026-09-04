@@ -1,13 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Wrench, RefreshCw } from 'lucide-react';
 import { NoiseTexture } from '@/components/ui/NoiseTexture';
 import { QuickAccessGrid } from '@/components/quick-access/QuickAccessGrid';
 import { QuickAccessTileModal } from '@/components/quick-access/QuickAccessTileModal';
 import { MaintenanceDialog } from '@/components/quick-access/MaintenanceDialog';
 import { QuickAccessPasswordModal } from '@/components/QuickAccessPasswordModal';
-import type { QuickAccessConfigDTO, QuickAccessTileDTO } from '@/lib/quick-access';
+import { VirtualAssistantLoginModal } from '@/components/virtual-assistant/VirtualAssistantLoginModal';
+import { slugifyTileTitle, type QuickAccessConfigDTO, type QuickAccessTileDTO } from '@/lib/quick-access';
 
 interface PublicQuickAccessBoardProps {
     onOpenWizard: (category: 'Irregularity' | 'JOUMPA') => void;
@@ -28,6 +29,7 @@ export function PublicQuickAccessBoard({ onOpenWizard, initialConfig = null }: P
     const [activeTile, setActiveTile] = useState<QuickAccessTileDTO | null>(null);
     const [passwordTile, setPasswordTile] = useState<QuickAccessTileDTO | null>(null);
     const [maintenanceTile, setMaintenanceTile] = useState<QuickAccessTileDTO | null>(null);
+    const [aiLoginTile, setAiLoginTile] = useState<QuickAccessTileDTO | null>(null);
 
     const fetchConfig = useCallback(async () => {
         setLoading(true);
@@ -47,16 +49,33 @@ export function PublicQuickAccessBoard({ onOpenWizard, initialConfig = null }: P
 
     useEffect(() => { void fetchConfig(); }, [fetchConfig]);
 
+    const openVirtualAssistant = async (tile: QuickAccessTileDTO) => {
+        try {
+            const res = await fetch('/api/auth/me', { cache: 'no-store' });
+            if (res.ok) {
+                window.location.assign('/virtual-assistant');
+                return;
+            }
+        } catch {
+            // Network hiccup — fall through to the login dialog rather than
+            // navigating into a page that would just redirect back out.
+        }
+        setAiLoginTile(tile);
+    };
+
     const handleTileClick = (tile: QuickAccessTileDTO) => {
         // Maintenance mode: tile is under maintenance, show dialog.
         if (tile.is_maintenance) {
             setMaintenanceTile(tile);
             return;
         }
-        // AI tile: enabled → straight to the virtual assistant, no modal.
+        // AI tile: enabled → open the assistant. It needs an account session,
+        // so an already-signed-in visitor goes straight through and a guest
+        // gets the inline login dialog instead of being bounced to /auth/login
+        // (which would drop them off this public page).
         if (tile.gated_by === 'ai_enabled') {
             if (config?.aiEnabled) {
-                window.location.href = '/virtual-assistant';
+                void openVirtualAssistant(tile);
                 return;
             }
             setMaintenanceTile(tile);
@@ -72,6 +91,28 @@ export function PublicQuickAccessBoard({ onOpenWizard, initialConfig = null }: P
         }
         setActiveTile(tile);
     };
+
+    // Quick-link support: /auth/public-report?open=<slug-of-title> (or
+    // ?open=<tile-id>, or ?open=irregularity / ?open=joumpa for the wizard
+    // tiles) auto-triggers that tile's click on load — same as clicking it
+    // by hand, so it opens the wizard, the content modal, the password
+    // gate, the maintenance dialog, or the AI redirect as appropriate.
+    const autoOpenedRef = useRef(false);
+    useEffect(() => {
+        if (autoOpenedRef.current || !config) return;
+        const open = new URLSearchParams(window.location.search).get('open')?.trim().toLowerCase();
+        if (!open) return;
+        const allTiles = config.sections.flatMap((s) => s.tiles);
+        const match = allTiles.find((t) => {
+            if (t.id.toLowerCase() === open) return true;
+            if (t.wizard_category && t.wizard_category.toLowerCase() === open) return true;
+            return slugifyTileTitle(t.title) === open;
+        });
+        if (match) {
+            autoOpenedRef.current = true;
+            handleTileClick(match);
+        }
+    }, [config]);
 
     // Same page chrome as the original wizard root: padding + noise texture.
     return (
@@ -123,6 +164,12 @@ export function PublicQuickAccessBoard({ onOpenWizard, initialConfig = null }: P
                     setActiveTile(passwordTile);
                     setPasswordTile(null);
                 }}
+            />
+
+            <VirtualAssistantLoginModal
+                isOpen={!!aiLoginTile}
+                onClose={() => setAiLoginTile(null)}
+                label={aiLoginTile?.title || "I'm in Charge"}
             />
 
             <MaintenanceDialog

@@ -2,11 +2,10 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import {
     canManageDivisionDocuments,
-    canViewAudienceScopedItem,
     getWorkspaceUser,
-    isBranchRole,
     normalizeRole,
 } from '@/lib/server/workspace-auth';
+import { canReadDivisionDocument } from '@/lib/server/division-document-access';
 import { deleteDriveFile, downloadDriveFile } from '@/lib/google-drive';
 import type { DivisionDocumentCategory, DivisionDocumentVisibilityScope } from '@/types';
 import type { MaterialLink } from '@/lib/division-documents-material-links';
@@ -70,39 +69,6 @@ async function getDocument(id: string) {
 
     if (error) throw error;
     return data as StoredDivisionDocument;
-}
-
-// Shared permission check for reading a division document: also imported by
-// the sibling list endpoint (app/api/division-documents/route.ts) so both
-// routes agree on who can see a document. A prior bug had the list endpoint
-// use a more permissive check (granting DIVISI_ESKALASI a blanket view and
-// letting any DIVISI_*/PARTNER_* role fall through to the audience check),
-// while this detail/download endpoint only lets branch roles fall through —
-// so a document visible in the list could 403 when opened. Keep this as the
-// single source of truth for both routes rather than re-diverging.
-// The document parameter is intentionally a minimal structural shape (not
-// StoredDivisionDocument) so the mapped DivisionDocument objects used by the
-// list route satisfy it too.
-export function canReadDivisionDocument(
-    user: NonNullable<Awaited<ReturnType<typeof getWorkspaceUser>>>,
-    document: {
-        division: StoredDivisionDocument['division'];
-        visibility_scope: DivisionDocumentVisibilityScope;
-        audience_station_ids?: string[] | null;
-        audience_roles?: string[] | null;
-    }
-) {
-    if (canManageDivisionDocuments(user.role, document.division)) return true;
-    if (!isBranchRole(user.role)) return false;
-
-    return canViewAudienceScopedItem(
-        user,
-        document.visibility_scope,
-        Array.isArray(document.audience_station_ids) ? document.audience_station_ids : [],
-        Array.isArray(document.audience_roles)
-            ? document.audience_roles.map((role) => normalizeRole(role)).filter(Boolean)
-            : []
-    );
 }
 
 function slugifyFilenamePart(value: string) {

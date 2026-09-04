@@ -19,7 +19,7 @@ export const SWITCHED_DIVISION_SESSION_MAX_AGE_SECONDS = 60 * 60 * 2;
 // Cross-request authorization state is deliberately short-lived. React cache
 // below removes duplicate work inside one request without extending revocation.
 const SESSION_CACHE_TTL_MS = 30 * 1000;
-const sessionCache = new Map<string, { payload: SessionPayload; expiresAt: number; cacheTime: number }>();
+const sessionCache = new Map<string, { payload: SessionPayload; expiresAt: number }>();
 
 function getCachedSession(sid: string): SessionPayload | null {
     const entry = sessionCache.get(sid);
@@ -29,12 +29,6 @@ function getCachedSession(sid: string): SessionPayload | null {
         return null;
     }
     return entry.payload;
-}
-
-function getCachedSessionAge(sid: string): number | null {
-    const entry = sessionCache.get(sid);
-    if (!entry) return null;
-    return Date.now() - entry.cacheTime;
 }
 
 function setCachedSession(sid: string, payload: SessionPayload): void {
@@ -53,7 +47,7 @@ function setCachedSession(sid: string, payload: SessionPayload): void {
             }
         }
     }
-    sessionCache.set(sid, { payload, expiresAt: Date.now() + SESSION_CACHE_TTL_MS, cacheTime: Date.now() });
+    sessionCache.set(sid, { payload, expiresAt: Date.now() + SESSION_CACHE_TTL_MS });
 }
 
 export function evictSessionCache(sid: string): void {
@@ -146,18 +140,12 @@ async function verifySessionUncached(token: string): Promise<SessionPayload | nu
 
         if (session.sid) {
 
+            // No last_active refresh here: an entry lives SESSION_CACHE_TTL_MS
+            // (30s), so its age could never reach the 15-minute threshold this
+            // branch used to test. The refresh that actually runs is the one on
+            // the DB path below, which compares the *stored* last_active.
             const cached = getCachedSession(session.sid);
-            if (cached) {
-
-                const cachedAge = getCachedSessionAge(session.sid);
-                if (cachedAge !== null && cachedAge > 15 * 60 * 1000) {
-                    supabaseAdmin.from('security_sessions')
-                        .update({ last_active: new Date().toISOString() })
-                        .eq('session_id', session.sid)
-                        .then();
-                }
-                return cached;
-            }
+            if (cached) return cached;
 
             // Single query: join users (and stations) via security_sessions.user_id to
             // avoid extra round-trips — this is the one DB-verified source of truth that
@@ -181,11 +169,24 @@ async function verifySessionUncached(token: string): Promise<SessionPayload | nu
             }
 
             if (!data) {
-                if (dbError) {
-                    console.warn(`[AUTH_UTILS] Session ${session.sid} DB lookup error:`, dbError.message, dbError.code);
-                } else {
-                    console.warn(`[AUTH_UTILS] Session ${session.sid} NOT FOUND in DB — attempting re-register`);
+                // A row that is simply absent is not a database problem — it is
+                // the answer. Re-registering on that turned any deletion of the
+                // row into a no-op: registerSession() inserts a fresh row with
+                // is_revoked defaulting to false, so a revoked-then-purged
+                // session came back alive on the next request for as long as the
+                // JWT had left to run. Recovery is now limited to the case it
+                // was meant for — the lookup itself failing.
+                //
+                // PostgREST reports "no rows" from .single() as PGRST116, so an
+                // error object alone does not mean the query failed.
+                const rowAbsent = !dbError || dbError.code === 'PGRST116';
+                if (rowAbsent) {
+                    console.warn(`[AUTH_UTILS] Session ${session.sid} NOT FOUND in DB — rejecting`);
+                    evictSessionCache(session.sid);
+                    return null;
                 }
+
+                console.warn(`[AUTH_UTILS] Session ${session.sid} DB lookup error:`, dbError.message, dbError.code);
 
                 try {
                     const { data: userData } = await supabaseAdmin
@@ -242,10 +243,19 @@ async function verifySessionUncached(token: string): Promise<SessionPayload | nu
 
             const lastActive = data.last_active ? new Date(data.last_active).getTime() : 0;
             if (!lastActive || (Date.now() - lastActive) > 15 * 60 * 1000) {
-                supabaseAdmin.from('security_sessions')
+                // Fire-and-forget on purpose — a heartbeat must not add latency
+                // to every authenticated request — but `.then()` with no
+                // arguments leaves the rejection unhandled, which on Node is an
+                // unhandledRejection and can take the process down.
+                void supabaseAdmin.from('security_sessions')
                     .update({ last_active: new Date().toISOString() })
                     .eq('session_id', session.sid)
-                    .then();
+                    .then(
+                        ({ error }) => {
+                            if (error) console.warn('[AUTH_UTILS] last_active refresh failed:', error.message);
+                        },
+                        (err: unknown) => console.warn('[AUTH_UTILS] last_active refresh failed:', err),
+                    );
             }
         }
 

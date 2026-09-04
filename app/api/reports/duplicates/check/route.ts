@@ -1,11 +1,14 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase-admin';
 import { checkRateLimit, getClientIpFromRequest } from '@/lib/security/rate-limit';
+import { cookies } from 'next/headers';
+import { verifySession } from '@/lib/auth-utils';
 
 type DuplicateCandidate = {
   id: string;
-  title: string;
-  status: string;
+  /** null for anonymous callers — see the projection in POST. */
+  title: string | null;
+  status: string | null;
   date_of_event: string | null;
   station_id: string | null;
   airline: string | null;
@@ -72,6 +75,15 @@ export async function POST(request: Request) {
     if (!rateLimit.success) {
       return NextResponse.json({ candidates: [] }, { status: 429 });
     }
+
+    // A session is optional here, but it decides how much of a matched report
+    // comes back. The rate limit alone was not the control it was taken for:
+    // date, station, airline and flight number are all enumerable from a public
+    // flight schedule, so 20 requests a minute was a workable rate at which to
+    // read out incident titles and their workflow status.
+    const cookieStore = await cookies();
+    const sessionToken = cookieStore.get('session')?.value;
+    const session = sessionToken ? await verifySession(sessionToken) : null;
 
     const body = await request.json();
     const incidentDate = String(body.incident_date || body.date_of_event || '').slice(0, 10);
@@ -155,6 +167,24 @@ export async function POST(request: Request) {
         if (normalizedArea && reportArea === normalizedArea) score += 0.1;
         if (normalizedCategory && reportCategory === normalizedCategory) score += 0.1;
         score += tokenSimilarity(description, report.description || report.report || report.title) * 0.25;
+
+        // Anonymous callers get enough to be warned they may be filing a
+        // duplicate — a match, its date and how close it is — but not the
+        // incident's own narrative or where it has got to. The station,
+        // airline and flight are echoes of what the caller just submitted, so
+        // withholding them costs the warning nothing.
+        if (!session) {
+          return {
+            id: String(report.id),
+            title: null,
+            status: null,
+            date_of_event: report.date_of_event || report.incident_date || report.created_at || null,
+            station_id: null,
+            airline: null,
+            flight_number: null,
+            similarity: Number(score.toFixed(2)),
+          };
+        }
 
         return {
           id: String(report.id),

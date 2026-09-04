@@ -6,7 +6,9 @@ import { calculateSlaDeadline } from '@/lib/constants/report-status';
 import { v5 as uuidv5 } from 'uuid';
 
 import { buildReportFingerprint } from '@/lib/report-fingerprint';
+import { formatWibDate, parseDate } from '@/lib/wib-date';
 import { escapeSpreadsheetCell } from '@/lib/security/sanitize';
+import { quoteForPostgrestFilter } from '@/lib/security/postgrest';
 import {
   resolveCaseClassification,
   resolveReportCategory,
@@ -97,6 +99,29 @@ async function setVersionedCache(key: string, data: unknown): Promise<void> {
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const REPORT_SHEETS = ['NON CARGO', 'CGO'];
 const SHEET_IDS: Record<string, number> = {};
+
+// Report fields that occupy a *date* cell in the sheet. Pushing these back as
+// ISO-UTC timestamps let Google Sheets re-interpret them in the spreadsheet's
+// own timezone (Asia/Jakarta), shifting the value; the next pull read the
+// shifted value back, so every sync moved these dates one more day into the
+// past. They must go out as a plain WIB calendar date, which round-trips
+// unchanged. See toSheetDateValue.
+const SHEET_DATE_FIELDS = new Set<string>([
+  'date_of_event',
+  'incident_date',
+  'resolved_at',
+  'sla_deadline',
+]);
+
+/** Renders an instant as the calendar date it falls on in WIB (UTC+7). */
+function toSheetDateValue(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  // Already a bare calendar date — leave it exactly as it is.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const instant = new Date(value);
+  if (isNaN(instant.getTime())) return null;
+  return formatWibDate(instant);
+}
 
 const PROP_TO_HEADER: Partial<Record<keyof Report, string[]>> = {
 
@@ -516,77 +541,10 @@ interface GetReportsOptions {
   maxSyncBatches?: number;
 }
 
-const MonthMap: Record<string, number> = {
-  januari: 0, jan: 0,
-  februari: 1, feb: 1,
-  maret: 2, mar: 2,
-  april: 3, apr: 3,
-  mei: 4,
-  juni: 5, jun: 5,
-  juli: 6, jul: 6,
-  agustus: 7, ags: 7, agt: 7,
-  september: 8, sep: 8,
-  oktober: 9, okt: 9, 
-  november: 10, nov: 10,
-  desember: 11, des: 11
-};
-
-export function parseDate(dateStr: string | number | Date): Date | null {
-  if (!dateStr) return null;
-  if (dateStr instanceof Date) return isNaN(dateStr.getTime()) ? null : dateStr;
-
-  if (typeof dateStr === 'number') {
-    return new Date(Math.round((dateStr - 25569) * 86400 * 1000));
-  }
-
-  const str = String(dateStr).trim();
-  if (!str) return null;
-
-  const isoMatch = str.match(/^(\d{4})[\-\/](\d{1,2})[\-\/](\d{1,2})/);
-  if (isoMatch) {
-    const d = new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  const parts = str.toLowerCase().split(/[\s,/-]+/);
-  if (parts.length >= 2) {
-    let day = 1;
-    let month = -1;
-    let year = -1;
-
-    const yearIdx = parts.findIndex(p => /^\d{4}$/.test(p));
-    if (yearIdx !== -1) {
-      year = parseInt(parts[yearIdx]);
-      for (let i = 0; i < parts.length; i++) {
-        if (i === yearIdx) continue;
-        if (MonthMap[parts[i]] !== undefined) {
-          month = MonthMap[parts[i]];
-          const dayCandidates = [parts[i-1], parts[i+1]].filter(p => p && /^\d{1,2}$/.test(p));
-          if (dayCandidates.length > 0) {
-            day = parseInt(dayCandidates[0]);
-          }
-          break;
-        }
-      }
-    }
-
-    if (year !== -1 && month !== -1) {
-      return new Date(year, month, day);
-    }
-  }
-
-  const ddmmyyyy = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-  if (ddmmyyyy) {
-    const day = parseInt(ddmmyyyy[1], 10);
-    const month = parseInt(ddmmyyyy[2], 10) - 1; 
-    const year = parseInt(ddmmyyyy[3], 10);
-    const d = new Date(year, month, day);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  const d = new Date(str);
-  return isNaN(d.getTime()) ? null : d;
-}
+// parseDate/formatWibDate live in lib/wib-date so the standalone sync
+// schedulers (plain .mjs, no server-only runtime) resolve sheet dates exactly
+// the way the app does. Re-exported for existing importers.
+export { formatWibDate, parseDate };
 
 function syncEscalationDivisionAliases<T extends Partial<Report>>(report: T): T {
   if (typeof report.esklasi_divisi === 'string' && report.esklasi_divisi.trim()) {
@@ -830,8 +788,20 @@ class ReportsService {
 
     const parsedEventDate = parseDate(report.date_of_event as string);
     if (parsedEventDate) {
-      report.date_of_event = parsedEventDate.toISOString();
-      if (!report.created_at) report.created_at = report.date_of_event;
+      // date_of_event lands in a Postgres `date` column, which truncates in UTC.
+      // toISOString() on a date parsed from text gives local midnight expressed
+      // as 17:00 UTC of the *previous* day in WIB, so the stored date came out
+      // one day early — and because the sync writes that value back to Sheets
+      // and re-reads it, the row lost another day on every sync. Emitting the
+      // local (WIB) calendar date makes all three input shapes the sheet can
+      // hold — serial number, "July 15, 2025", and "2025-07-15" — converge on
+      // the same stored day and stay put.
+      report.date_of_event = formatWibDate(parsedEventDate);
+      // created_at is a timestamp column (and feeds calculateSlaDeadline), so
+      // it needs an instant, not a bare date — a bare `YYYY-MM-DD` is read as
+      // UTC midnight, i.e. 07:00 WIB, and renders as the previous day for any
+      // viewer west of UTC. Anchor it to WIB midnight of the event day.
+      if (!report.created_at) report.created_at = `${report.date_of_event}T00:00:00+07:00`;
     } else if (report.created_at) {
       const parsedCreated = parseDate(report.created_at as string);
       if (parsedCreated) {
@@ -1115,6 +1085,11 @@ class ReportsService {
 
         const val = report[prop];
         if (val === undefined || val === null || val === '') continue;
+        // Date cells must go out as a WIB calendar date on *every* write path,
+        // not just the field-level update in buildUpdateBatch — createReport
+        // and batchCreateReports both build their rows through here, and an
+        // ISO-UTC timestamp gets re-interpreted by the sheet and drifts a day.
+        if (SHEET_DATE_FIELDS.has(String(prop))) return toSheetDateValue(val) ?? val;
         if (Array.isArray(val)) return val.join(' | ');
         if (typeof val === 'object') return JSON.stringify(val);
         return val;
@@ -1202,7 +1177,15 @@ class ReportsService {
       ))
       .sort(([left], [right]) => left.localeCompare(right));
     const canUseProjectionCache = source !== 'sheets' && !options?.refresh;
-    const projectionCacheKey = `${CACHE_KEY_ALL_REPORTS}:${fields?.join(',') || 'full'}:${JSON.stringify(normalizedFilterEntries)}:${options?.maxSyncBatches ?? 'default'}`;
+    // Sorted and de-duplicated: buildProjectionFields (query-executor) collects
+    // a tile's columns in dimension/measure/filter/sort order, so two tiles
+    // wanting the same columns in a different order minted two cache entries
+    // holding identical data — and the cache evicts at MAX_CACHE_ENTRIES, so
+    // the duplicates pushed out entries that could have been reused.
+    const fieldsKey = fields?.length
+      ? [...new Set(fields)].sort().join(',')
+      : 'full';
+    const projectionCacheKey = `${CACHE_KEY_ALL_REPORTS}:${fieldsKey}:${JSON.stringify(normalizedFilterEntries)}:${options?.maxSyncBatches ?? 'default'}`;
     const cacheEpochAtStart = reportCacheEpoch;
 
     let selectedReports: Report[] = [];
@@ -1260,16 +1243,14 @@ class ReportsService {
               const reportDate = parseDate(report.date_of_event || report.created_at);
               if (!reportDate) return false;
 
-              if (filters.dateFrom) {
-                const fromDate = new Date(filters.dateFrom);
-                if (reportDate < fromDate) return false;
-              }
-
-              if (filters.dateTo) {
-                const toDate = new Date(filters.dateTo);
-                toDate.setHours(23, 59, 59, 999);
-                if (reportDate > toDate) return false;
-              }
+              // Compare WIB calendar days as strings, the same inclusive
+              // comparison the DB push-down does (`gte/lte` on the
+              // `date_of_event` date column). Comparing instants instead made
+              // the boundary day fall in or out depending on the process
+              // timezone, so the two paths disagreed on the same filter.
+              const reportDay = formatWibDate(reportDate);
+              if (filters.dateFrom && reportDay < String(filters.dateFrom).slice(0, 10)) return false;
+              if (filters.dateTo && reportDay > String(filters.dateTo).slice(0, 10)) return false;
             }
 
             if (filters.status && filters.status !== 'all' && (report.status !== filters.status)) return false;
@@ -1456,16 +1437,33 @@ class ReportsService {
           .select(selectFields)
           .order('date_of_event', { ascending: false });
         if (filters?.hub && filters.hub !== 'all') q = q.eq('hub', filters.hub);
-        if (filters?.branch && filters.branch !== 'all') q = q.eq('branch', filters.branch);
-        if (filters?.branchIn && filters.branchIn.length > 0) {
+        // A single branch has to match the same three columns branchIn does.
+        // Pushing `.eq('branch', X)` excluded rows whose branch column is empty
+        // but whose station_code or reporting_branch is X — the in-memory
+        // predicate accepts those, so Postgres dropped rows the caller expected
+        // and the counts came out short with nothing to show why.
+        const branchCodes = filters?.branchIn?.length
+          ? filters.branchIn
+          : filters?.branch && filters.branch !== 'all'
+            ? [filters.branch]
+            : [];
+        if (branchCodes.length > 0) {
           // Station data is inconsistently stored across branch/station_code/
           // reporting_branch, so match any of the three. Only pass through
           // simple station-code tokens — never interpolate arbitrary text
           // into a raw PostgREST .or() filter string.
-          const safeCodes = filters.branchIn.filter((code) => /^[A-Za-z0-9_-]+$/.test(code));
+          const safeCodes = branchCodes.filter((code) => /^[A-Za-z0-9_-]+$/.test(code));
           if (safeCodes.length > 0) {
             const list = safeCodes.join(',');
             q = q.or(`branch.in.(${list}),station_code.in.(${list}),reporting_branch.in.(${list})`);
+          } else {
+            // Fail closed. Skipping the predicate here returned *every* branch's
+            // rows for a caller that asked to be scoped to specific ones, and
+            // getReports() trusts this push-down and does no in-memory branch
+            // check for DB-backed sources — so a branchIn derived from a user's
+            // station RBAC leaked the whole company's reports whenever none of
+            // its codes were expressible as a bare PostgREST token.
+            q = q.in('station_code', []);
           }
         }
         if (filters?.area && filters.area !== 'all') q = q.eq('area', filters.area);
@@ -1681,7 +1679,7 @@ class ReportsService {
     id: string,
     options: { skipLiveFetch?: boolean; forceLiveFetch?: boolean } = {},
   ): Promise<Report | null> {
-    const safeId = `"${id.replace(/"/g, '""')}"`;
+    const safeId = quoteForPostgrestFilter(id);
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
     let query = supabaseAdmin.from('ground_handling_irregularity_report').select('*').limit(1);
@@ -1805,10 +1803,12 @@ class ReportsService {
             let value = row[index];
 
             if (prop === 'date_of_event' && value) {
-                try {
-                    const d = new Date(value);
-                    if (!isNaN(d.getTime())) value = d.toISOString().split('T')[0];
-                } catch {}
+                // Same conversion mapRowToReport uses. `new Date(value)` +
+                // toISOString() read the *UTC* day, so a sheet value like
+                // "7/15/2025" came back as 2025-07-14 from any process running
+                // east of UTC — this read path and the bulk one disagreed.
+                const d = parseDate(value);
+                if (d) value = formatWibDate(d);
             }
             report[prop] = value;
         }
@@ -1838,7 +1838,38 @@ class ReportsService {
     return report?.original_id || null;
   }
 
+  /**
+   * Serializes updates to the same report. The evidence merge reads the row,
+   * unions the URL lists, then writes the result back to Sheets — so two
+   * updates that read the same "before" state each write a union missing the
+   * other's file, and the second write wins in the source of truth.
+   *
+   * ponytail: in-process chain, so it only orders callers that land on the same
+   * instance. Two instances can still interleave; swap in a Postgres advisory
+   * lock (or a CAS on the evidence cell) if that shows up in practice.
+   */
+  private updateChain = new Map<string, Promise<unknown>>();
+
   async updateReport(id: string, updates: Partial<Report>, options: { skipLiveFetch?: boolean } = {}): Promise<Report | null> {
+    // Callers reach the same report by uuid or by `SHEET!row_N`. Keying the
+    // chain on the raw argument put those two on separate chains, so the pair
+    // that most needs serializing — a PWA replay and a desktop edit of one
+    // report — was exactly the pair it did not serialize.
+    const chainKey = (await this.resolveIdToOriginal(id)) ?? id;
+    const previous = this.updateChain.get(chainKey) ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() => this.updateReportUnsynchronized(id, updates, options));
+
+    this.updateChain.set(chainKey, run);
+    try {
+      return await run;
+    } finally {
+      if (this.updateChain.get(chainKey) === run) this.updateChain.delete(chainKey);
+    }
+  }
+
+  private async updateReportUnsynchronized(id: string, updates: Partial<Report>, options: { skipLiveFetch?: boolean } = {}): Promise<Report | null> {
     const originalId = await this.resolveIdToOriginal(id);
     if (!originalId) {
         console.error('Invalid ID format for update:', id);
@@ -1972,7 +2003,9 @@ class ReportsService {
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let stringValue: any = value;
+        const sheetDate = SHEET_DATE_FIELDS.has(key) ? toSheetDateValue(value) : null;
         if (value === null || value === undefined) stringValue = '';
+        else if (sheetDate) stringValue = sheetDate;
         else if (Array.isArray(value)) stringValue = value.join('\n');
         else if (typeof value === 'object') stringValue = JSON.stringify(value);
         else stringValue = String(value);
